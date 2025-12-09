@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	managementReleaseURL = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
+	// TODO: Set up management center repo for llm-mux
+	managementReleaseURL = "https://api.github.com/repos/nghyane/llm-mux-management/releases/latest"
 	managementAssetName  = "management.html"
-	httpUserAgent        = "CLIProxyAPI-management-updater"
+	httpUserAgent        = "llm-mux-management-updater"
 	updateCheckInterval  = 3 * time.Hour
 )
 

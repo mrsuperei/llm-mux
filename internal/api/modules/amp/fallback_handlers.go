@@ -71,7 +71,7 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 }
 
 // FallbackHandler wraps a standard handler with fallback logic to ampcode.com
-// when the model's provider is not available in CLIProxyAPI
+// when the model's provider is not available in llm-mux
 type FallbackHandler struct {
 	getProxy    func() *httputil.ReverseProxy
 	modelMapper ModelMapper
@@ -99,7 +99,7 @@ func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
 }
 
 // WrapHandler wraps a gin.HandlerFunc with fallback logic
-// If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
+// If the model's provider is not configured in llm-mux, it forwards to ampcode.com
 func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path

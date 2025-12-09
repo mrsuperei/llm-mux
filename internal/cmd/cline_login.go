@@ -2,7 +2,7 @@
  * @file Cline login command implementation
  * @description Handles the Cline authentication flow using refresh tokens. Unlike traditional
  * OAuth flows, Cline uses a simpler approach where users export a refresh token from the
- * VSCode extension and provide it to CLIProxyAPI. This file implements the command-line
+ * VSCode extension and provide it to llm-mux. This file implements the command-line
  * interface for the Cline login process.
  */
 

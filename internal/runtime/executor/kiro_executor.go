@@ -149,7 +149,7 @@ func (e *KiroExecutor) buildHTTPRequest(rc *requestContext) (*http.Request, erro
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-	httpReq.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.7 KiroIDE-0.1.25 CLIProxyAPI")
+	httpReq.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.7 KiroIDE-0.1.25 llm-mux")
 	httpReq.Header.Set("amz-sdk-request", "attempt=1; max=1")
 	if rc.token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+rc.token)
