@@ -2,6 +2,32 @@
 
 Multi-provider LLM gateway with unified OpenAI-compatible API.
 
+## Installation
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap nghyane/tap
+brew install llm-mux
+
+# Start as service
+brew services start llm-mux
+```
+
+### Docker
+
+```bash
+docker pull nghyane/llm-mux
+docker run -p 8318:8318 -v ./config.yaml:/llm-mux/config.yaml nghyane/llm-mux
+```
+
+### Build from source
+
+```bash
+go build -o llm-mux ./cmd/server/
+./llm-mux -config config.yaml
+```
+
 ## Features
 
 - **Multi-provider support** - Gemini, Claude, OpenAI, Vertex AI, and more
@@ -10,18 +36,6 @@ Multi-provider LLM gateway with unified OpenAI-compatible API.
 - **IR-based translation** - Canonical intermediate representation for clean format conversion
 - **Load balancing** - Intelligent provider selection with performance tracking
 - **Streaming** - SSE and NDJSON streaming support
-
-## Quick Start
-
-```bash
-# Install via Homebrew (coming soon)
-brew tap nghyane/tap
-brew install llm-mux
-
-# Or build from source
-go build -o llm-mux ./cmd/server/
-./llm-mux -config config.yaml
-```
 
 ## Configuration
 
@@ -72,9 +86,9 @@ POST /api/chat                # Ollama-compatible API
 
 ```bash
 # OAuth login for providers
-./llm-mux login gemini-cli
-./llm-mux login claude
-./llm-mux login codex
+llm-mux login gemini-cli
+llm-mux login claude
+llm-mux login codex
 ```
 
 ## SDK Usage
