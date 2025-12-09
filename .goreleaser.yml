@@ -1,0 +1,74 @@
+version: 2
+
+builds:
+  - id: "llm-mux"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/server/
+    binary: llm-mux
+    ldflags:
+      - -s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+
+archives:
+  - id: "llm-mux"
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+      - config.example.yaml
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+brews:
+  - name: llm-mux
+    repository:
+      owner: nghyane
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/nghyane/llm-mux"
+    description: "Multi-provider LLM gateway with unified API"
+    license: "MIT"
+    install: |
+      bin.install "llm-mux"
+    service: |
+      run [opt_bin/"llm-mux", "-config", etc/"llm-mux/config.yaml"]
+      keep_alive true
+      log_path var/"log/llm-mux.log"
+      error_log_path var/"log/llm-mux.log"
+      working_dir var/"llm-mux"
+    post_install: |
+      (etc/"llm-mux").mkpath
+      (var/"llm-mux").mkpath
+      etc.install "config.example.yaml" => "llm-mux/config.yaml" unless (etc/"llm-mux/config.yaml").exist?
+    caveats: |
+      Config file: #{etc}/llm-mux/config.yaml
+
+      To start llm-mux:
+        brew services start llm-mux
+
+      Or run manually:
+        llm-mux -config #{etc}/llm-mux/config.yaml
+    test: |
+      system "#{bin}/llm-mux", "-version"

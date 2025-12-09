@@ -1,0 +1,830 @@
+// Package to_ir converts provider-specific API formats into unified format.
+// This file handles Gemini AI Studio API requests and responses (streaming and non-streaming).
+package to_ir
+
+import (
+	"encoding/json"
+	"os"
+	"strings"
+	"time"
+
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+
+	"github.com/nghyane/llm-mux/internal/translator_new/ir"
+)
+
+// debugToolCalls enables verbose logging of tool call arguments for debugging
+var debugToolCalls = os.Getenv("DEBUG_TOOL_CALLS") == "1"
+
+// ParseGeminiRequest converts a raw Gemini API request JSON into unified format.
+// Handles both native Gemini format and Gemini CLI format (with "request" wrapper).
+func ParseGeminiRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
+	if !gjson.ValidBytes(rawJSON) {
+		return nil, &json.UnmarshalTypeError{Value: "invalid json"}
+	}
+
+	parsed := gjson.ParseBytes(rawJSON)
+
+	// Handle Gemini CLI format: {"request": {...}}
+	if requestWrapper := parsed.Get("request"); requestWrapper.Exists() {
+		parsed = requestWrapper
+	}
+
+	req := &ir.UnifiedChatRequest{}
+
+	req.Model = parsed.Get("model").String()
+
+	// Generation Config
+	if gc := parsed.Get("generationConfig"); gc.Exists() {
+		if v := gc.Get("maxOutputTokens"); v.Exists() {
+			i := int(v.Int())
+			req.MaxTokens = &i
+		}
+		if v := gc.Get("temperature"); v.Exists() {
+			f := v.Float()
+			req.Temperature = &f
+		}
+		if v := gc.Get("topP"); v.Exists() {
+			f := v.Float()
+			req.TopP = &f
+		}
+		if v := gc.Get("topK"); v.Exists() {
+			i := int(v.Int())
+			req.TopK = &i
+		}
+		if v := gc.Get("stopSequences"); v.Exists() && v.IsArray() {
+			for _, s := range v.Array() {
+				req.StopSequences = append(req.StopSequences, s.String())
+			}
+		}
+
+		if tc := gc.Get("thinkingConfig"); tc.Exists() {
+			req.Thinking = &ir.ThinkingConfig{}
+			if v := tc.Get("thinkingBudget"); v.Exists() {
+				req.Thinking.Budget = int(v.Int())
+			}
+			if v := tc.Get("includeThoughts"); v.Exists() {
+				req.Thinking.IncludeThoughts = v.Bool()
+			}
+		}
+
+		if v := gc.Get("responseModalities"); v.Exists() && v.IsArray() {
+			for _, m := range v.Array() {
+				req.ResponseModality = append(req.ResponseModality, m.String())
+			}
+		}
+
+		var schemaResult gjson.Result
+		if rs := gc.Get("responseJsonSchema"); rs.Exists() {
+			schemaResult = rs
+		} else if rs := gc.Get("responseSchema"); rs.Exists() {
+			schemaResult = rs
+		}
+		if schemaResult.Exists() && schemaResult.IsObject() {
+			var schema map[string]interface{}
+			if err := json.Unmarshal([]byte(schemaResult.Raw), &schema); err == nil {
+				req.ResponseSchema = schema
+			}
+		}
+	}
+
+	// System Instruction
+	if si := parsed.Get("systemInstruction"); si.Exists() {
+		systemText := parseGeminiSystemInstruction(si)
+		if systemText != "" {
+			req.Messages = append(req.Messages, ir.Message{
+				Role:    ir.RoleSystem,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: systemText}},
+			})
+		}
+	}
+
+	if contents := parsed.Get("contents"); contents.Exists() && contents.IsArray() {
+		for _, c := range contents.Array() {
+			msg := parseGeminiContent(c)
+			if msg.Role != "" {
+				req.Messages = append(req.Messages, msg)
+			}
+		}
+	}
+
+	if tools := parsed.Get("tools"); tools.Exists() && tools.IsArray() {
+		for _, t := range tools.Array() {
+			if fds := t.Get("functionDeclarations"); fds.Exists() && fds.IsArray() {
+				for _, fd := range fds.Array() {
+					var params map[string]interface{}
+					if p := fd.Get("parameters"); p.Exists() && p.IsObject() {
+						if err := json.Unmarshal([]byte(p.Raw), &params); err == nil {
+							params = ir.CleanJsonSchema(params)
+						}
+					}
+					if params == nil {
+						params = make(map[string]interface{})
+					}
+					req.Tools = append(req.Tools, ir.ToolDefinition{
+						Name:        fd.Get("name").String(),
+						Description: fd.Get("description").String(),
+						Parameters:  params,
+					})
+				}
+			}
+
+			// Built-in tools stored in Metadata for passthrough
+			if req.Metadata == nil {
+				req.Metadata = make(map[string]any)
+			}
+			if gs := t.Get("googleSearch"); gs.Exists() {
+				var gsVal interface{}
+				if gs.IsObject() {
+					json.Unmarshal([]byte(gs.Raw), &gsVal)
+				} else {
+					gsVal = map[string]interface{}{}
+				}
+				req.Metadata[ir.MetaGoogleSearch] = gsVal
+			}
+			if gsr := t.Get("googleSearchRetrieval"); gsr.Exists() {
+				var gsrVal interface{}
+				if gsr.IsObject() {
+					json.Unmarshal([]byte(gsr.Raw), &gsrVal)
+				} else {
+					gsrVal = map[string]interface{}{}
+				}
+				req.Metadata[ir.MetaGoogleSearchRetrieval] = gsrVal
+			}
+			if ce := t.Get("codeExecution"); ce.Exists() {
+				var ceVal interface{}
+				if ce.IsObject() {
+					json.Unmarshal([]byte(ce.Raw), &ceVal)
+				} else {
+					ceVal = map[string]interface{}{}
+				}
+				req.Metadata[ir.MetaCodeExecution] = ceVal
+			}
+			if uc := t.Get("urlContext"); uc.Exists() {
+				var ucVal interface{}
+				if uc.IsObject() {
+					json.Unmarshal([]byte(uc.Raw), &ucVal)
+				} else {
+					ucVal = map[string]interface{}{}
+				}
+				req.Metadata[ir.MetaURLContext] = ucVal
+			}
+		}
+	}
+
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any)
+	}
+	if v := parsed.Get("cachedContent"); v.Exists() && v.String() != "" {
+		req.Metadata[ir.MetaGeminiCachedContent] = v.String()
+	}
+	if v := parsed.Get("labels"); v.Exists() && v.IsObject() {
+		var labels map[string]interface{}
+		if json.Unmarshal([]byte(v.Raw), &labels) == nil {
+			req.Metadata[ir.MetaGeminiLabels] = labels
+		}
+	}
+
+	return req, nil
+}
+
+// parseGeminiSystemInstruction extracts text from systemInstruction field.
+func parseGeminiSystemInstruction(si gjson.Result) string {
+	if parts := si.Get("parts"); parts.Exists() && parts.IsArray() {
+		var texts []string
+		for _, p := range parts.Array() {
+			if text := p.Get("text").String(); text != "" {
+				texts = append(texts, text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	if si.Type == gjson.String {
+		return si.String()
+	}
+	return ""
+}
+
+// parseGeminiContent converts a Gemini content object to IR Message.
+func parseGeminiContent(c gjson.Result) ir.Message {
+	roleStr := c.Get("role").String()
+	role := ir.RoleUser
+	if roleStr == "model" {
+		role = ir.RoleAssistant
+	}
+
+	msg := ir.Message{Role: role}
+	parts := c.Get("parts")
+	if !parts.Exists() || !parts.IsArray() {
+		return msg
+	}
+
+	for _, part := range parts.Array() {
+		if text := part.Get("text"); text.Exists() && text.String() != "" {
+			if part.Get("thought").Bool() {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: text.String()})
+			} else {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: text.String()})
+			}
+		}
+
+		if inlineData := part.Get("inlineData"); inlineData.Exists() {
+			mimeType := inlineData.Get("mimeType").String()
+			if mimeType == "" {
+				mimeType = inlineData.Get("mime_type").String()
+			}
+			data := inlineData.Get("data").String()
+			if data != "" {
+				msg.Content = append(msg.Content, ir.ContentPart{
+					Type:  ir.ContentTypeImage,
+					Image: &ir.ImagePart{MimeType: mimeType, Data: data},
+				})
+			}
+		}
+
+		if fileData := part.Get("fileData"); fileData.Exists() {
+			if uri := fileData.Get("fileUri").String(); uri != "" {
+				mimeType := fileData.Get("mimeType").String()
+				msg.Content = append(msg.Content, ir.ContentPart{
+					Type:  ir.ContentTypeImage,
+					Image: &ir.ImagePart{URL: uri, MimeType: mimeType},
+				})
+			}
+		}
+
+		if fc := part.Get("functionCall"); fc.Exists() {
+			name := fc.Get("name").String()
+			args := fc.Get("args").Raw
+			if args == "" {
+				args = "{}"
+			}
+			id := fc.Get("id").String()
+			if id == "" {
+				id = ir.GenToolCallID()
+			}
+			msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: id, Name: name, Args: args})
+		}
+
+		if fr := part.Get("functionResponse"); fr.Exists() {
+			name := fr.Get("name").String()
+			response := fr.Get("response").Raw
+			if response == "" {
+				response = "{}"
+			}
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type:       ir.ContentTypeToolResult,
+				ToolResult: &ir.ToolResultPart{ToolCallID: name, Result: response},
+			})
+		}
+	}
+
+	return msg
+}
+
+// ParseGeminiResponse parses a non-streaming Gemini API response into unified format.
+func ParseGeminiResponse(rawJSON []byte) (*ir.UnifiedChatRequest, []ir.Message, *ir.Usage, error) {
+	messages, usage, _, err := ParseGeminiResponseMetaWithContext(rawJSON, nil)
+	return nil, messages, usage, err
+}
+
+// ParseGeminiResponseCandidates parses all candidates from Gemini response.
+// Use this when candidateCount > 1 to get multiple alternative responses.
+func ParseGeminiResponseCandidates(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.CandidateResult, *ir.Usage, *ir.ResponseMeta, error) {
+	if !gjson.ValidBytes(rawJSON) {
+		return nil, nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
+	}
+
+	// Unwrap Antigravity envelope (zero-copy)
+	parsed, _ := ir.UnwrapAntigravityEnvelope(rawJSON)
+	meta := parseGeminiMeta(parsed)
+	usage := parseGeminiUsage(parsed)
+
+	candidates := parsed.Get("candidates").Array()
+	if len(candidates) == 0 {
+		return nil, usage, meta, nil
+	}
+
+	var results []ir.CandidateResult
+	for i, candidate := range candidates {
+		msg := parseGeminiCandidate(candidate, schemaCtx)
+		if msg == nil {
+			continue
+		}
+
+		finishReason := ir.FinishReasonStop
+		if fr := candidate.Get("finishReason"); fr.Exists() {
+			finishReason = ir.MapGeminiFinishReason(fr.String())
+		}
+
+		results = append(results, ir.CandidateResult{
+			Index:        i,
+			Messages:     []ir.Message{*msg},
+			FinishReason: finishReason,
+			Logprobs:     parseGeminiLogprobs(candidate),
+		})
+	}
+
+	return results, usage, meta, nil
+}
+
+// parseGeminiCandidate parses a single candidate into a Message.
+func parseGeminiCandidate(candidate gjson.Result, schemaCtx *ir.ToolSchemaContext) *ir.Message {
+	parts := candidate.Get("content.parts").Array()
+	if len(parts) == 0 {
+		return nil
+	}
+
+	msg := &ir.Message{Role: ir.RoleAssistant}
+	for _, part := range parts {
+		ts := part.Get("thoughtSignature").String()
+		if ts == "" {
+			ts = part.Get("thought_signature").String()
+		}
+
+		if text := part.Get("text"); text.Exists() && text.String() != "" {
+			if part.Get("thought").Bool() {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: text.String(), ThoughtSignature: ts})
+			} else {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: text.String(), ThoughtSignature: ts})
+			}
+		} else if fc := part.Get("functionCall"); fc.Exists() {
+			if name := fc.Get("name").String(); name != "" {
+				args := fc.Get("args").Raw
+				if args == "" {
+					args = "{}"
+				}
+				if schemaCtx != nil {
+					args = schemaCtx.NormalizeToolCallArgs(name, args)
+				}
+				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: ir.GenToolCallID(), Name: name, Args: args, ThoughtSignature: ts})
+			}
+		} else if ec := part.Get("executableCode"); ec.Exists() {
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type: ir.ContentTypeExecutableCode,
+				CodeExecution: &ir.CodeExecutionPart{
+					Language: ec.Get("language").String(),
+					Code:     ec.Get("code").String(),
+				},
+				ThoughtSignature: ts,
+			})
+		} else if cer := part.Get("codeExecutionResult"); cer.Exists() {
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type: ir.ContentTypeCodeResult,
+				CodeExecution: &ir.CodeExecutionPart{
+					Outcome: cer.Get("outcome").String(),
+					Output:  cer.Get("output").String(),
+				},
+				ThoughtSignature: ts,
+			})
+		} else if img := parseGeminiInlineImage(part); img != nil {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img, ThoughtSignature: ts})
+		}
+	}
+
+	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
+		return nil
+	}
+	return msg
+}
+
+// ParseGeminiResponseMeta parses a non-streaming Gemini API response into unified format with metadata.
+// Returns messages, usage, and response metadata (responseId, createTime, nativeFinishReason).
+func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
+	return ParseGeminiResponseMetaWithContext(rawJSON, nil)
+}
+
+// ParseGeminiResponseMetaWithContext parses a non-streaming Gemini API response with schema context.
+// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
+func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
+	if !gjson.ValidBytes(rawJSON) {
+		return nil, nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
+	}
+
+	// Unwrap Antigravity envelope (zero-copy)
+	parsed, _ := ir.UnwrapAntigravityEnvelope(rawJSON)
+	meta := parseGeminiMeta(parsed)
+	usage := parseGeminiUsage(parsed)
+
+	candidates := parsed.Get("candidates").Array()
+	if len(candidates) == 0 {
+		return nil, usage, meta, nil
+	}
+
+	parts := candidates[0].Get("content.parts").Array()
+	if len(parts) == 0 {
+		return nil, usage, meta, nil
+	}
+
+	msg := ir.Message{Role: ir.RoleAssistant}
+	for _, part := range parts {
+		// Extract thought signature if present
+		ts := part.Get("thoughtSignature").String()
+		if ts == "" {
+			ts = part.Get("thought_signature").String()
+		}
+
+		if text := part.Get("text"); text.Exists() && text.String() != "" {
+			if part.Get("thought").Bool() {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: text.String(), ThoughtSignature: ts})
+			} else {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: text.String(), ThoughtSignature: ts})
+			}
+		} else if fc := part.Get("functionCall"); fc.Exists() {
+			if name := fc.Get("name").String(); name != "" {
+				args := fc.Get("args").Raw
+				if args == "" {
+					args = "{}"
+				}
+				// Normalize tool call args based on schema context
+				if schemaCtx != nil {
+					args = schemaCtx.NormalizeToolCallArgs(name, args)
+				}
+				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: ir.GenToolCallID(), Name: name, Args: args, ThoughtSignature: ts})
+			}
+		} else if ec := part.Get("executableCode"); ec.Exists() {
+			// Gemini code execution: code to run
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type: ir.ContentTypeExecutableCode,
+				CodeExecution: &ir.CodeExecutionPart{
+					Language: ec.Get("language").String(),
+					Code:     ec.Get("code").String(),
+				},
+				ThoughtSignature: ts,
+			})
+		} else if cer := part.Get("codeExecutionResult"); cer.Exists() {
+			// Gemini code execution: result
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type: ir.ContentTypeCodeResult,
+				CodeExecution: &ir.CodeExecutionPart{
+					Outcome: cer.Get("outcome").String(),
+					Output:  cer.Get("output").String(),
+				},
+				ThoughtSignature: ts,
+			})
+		} else if img := parseGeminiInlineImage(part); img != nil {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img, ThoughtSignature: ts})
+		} else if ts != "" {
+			// Part with only thought signature (and maybe empty text)
+			// Preserve it as a reasoning part with empty text
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: "", ThoughtSignature: ts})
+		}
+	}
+
+	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
+		return nil, usage, meta, nil
+	}
+
+	return []ir.Message{msg}, usage, meta, nil
+}
+
+// ParseGeminiChunk parses a streaming Gemini API chunk into events.
+func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
+	return ParseGeminiChunkWithContext(rawJSON, nil)
+}
+
+// ParseGeminiChunkWithContext parses a streaming Gemini API chunk with schema context.
+// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
+func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
+	// Handle SSE format: "data: {...}" or "data:{...}"
+	rawJSON = ir.ExtractSSEData(rawJSON)
+	if len(rawJSON) == 0 {
+		return nil, nil
+	}
+	if string(rawJSON) == "[DONE]" {
+		return []ir.UnifiedEvent{{Type: ir.EventTypeFinish}}, nil
+	}
+	if !gjson.ValidBytes(rawJSON) {
+		return nil, &json.UnmarshalTypeError{Value: "invalid json"}
+	}
+
+	// Debug: log raw chunk for analysis
+	if debugToolCalls {
+		// Only log chunks that contain functionCall to reduce noise
+		rawStr := ir.BytesToString(rawJSON)
+		if gjson.Get(rawStr, "candidates.0.content.parts.#(functionCall)").Exists() ||
+			gjson.Get(rawStr, "response.candidates.0.content.parts.#(functionCall)").Exists() {
+			log.Debugf("gemini: RAW CHUNK WITH FUNCTION CALL:\n%s", rawStr)
+		}
+	}
+
+	// Unwrap Antigravity envelope (zero-copy)
+	parsed, _ := ir.UnwrapAntigravityEnvelope(rawJSON)
+
+	var events []ir.UnifiedEvent
+	var finishReason ir.FinishReason
+	var usage *ir.Usage
+	var toolCallIndex int // Track index for multi-tool calls
+
+	// Parse usage metadata if present
+	if u := parseGeminiUsage(parsed); u != nil {
+		usage = u
+	}
+
+	if candidates := parsed.Get("candidates").Array(); len(candidates) > 0 {
+		candidate := candidates[0]
+
+		for _, part := range candidate.Get("content.parts").Array() {
+			ts := part.Get("thoughtSignature").String()
+			if ts == "" {
+				ts = part.Get("thought_signature").String()
+			}
+
+			if text := part.Get("text"); text.Exists() && text.String() != "" {
+				if part.Get("thought").Bool() {
+					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: text.String(), ThoughtSignature: ts})
+				} else {
+					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: text.String(), ThoughtSignature: ts})
+				}
+			} else if fc := part.Get("functionCall"); fc.Exists() {
+				if name := fc.Get("name").String(); name != "" {
+					// NOTE: We no longer emit a separate reasoning event for thoughtSignature here.
+					// With include_thoughts=true, Gemini sends readable thoughts in separate parts
+					// with "thought": true. The signature is preserved in ToolCall.ThoughtSignature
+					// for history/context purposes.
+
+					id := fc.Get("id").String()
+					if id == "" {
+						id = ir.GenToolCallID()
+					}
+					args := fc.Get("args").Raw
+					if args == "" {
+						args = "{}"
+					}
+
+					// Debug: log raw tool call args before normalization
+					if debugToolCalls {
+						log.Debugf("gemini: RAW TOOL CALL - name=%s id=%s args=%s", name, id, args)
+					}
+
+					// Normalize tool call args based on schema context
+					if schemaCtx != nil {
+						normalizedArgs := schemaCtx.NormalizeToolCallArgs(name, args)
+						if debugToolCalls && normalizedArgs != args {
+							log.Debugf("gemini: NORMALIZED - name=%s original=%s normalized=%s", name, args, normalizedArgs)
+						}
+						args = normalizedArgs
+					}
+
+					var partialArgs string
+					if pa := fc.Get("partialArgs"); pa.Exists() {
+						partialArgs = pa.Raw
+						// NOTE: Do NOT normalize partialArgs - they are incomplete JSON fragments
+						// that cannot be safely parsed or modified. Only normalize complete args.
+					}
+
+					events = append(events, ir.UnifiedEvent{
+						Type:             ir.EventTypeToolCall,
+						ToolCall:         &ir.ToolCall{ID: id, Name: name, Args: args, PartialArgs: partialArgs, ThoughtSignature: ts},
+						ToolCallIndex:    toolCallIndex,
+						ThoughtSignature: ts,
+					})
+					toolCallIndex++
+				}
+			} else if ec := part.Get("executableCode"); ec.Exists() {
+				// Gemini code execution: code to run
+				events = append(events, ir.UnifiedEvent{
+					Type: ir.EventTypeCodeExecution,
+					CodeExecution: &ir.CodeExecutionPart{
+						Language: ec.Get("language").String(),
+						Code:     ec.Get("code").String(),
+					},
+					ThoughtSignature: ts,
+				})
+			} else if cer := part.Get("codeExecutionResult"); cer.Exists() {
+				// Gemini code execution: result
+				events = append(events, ir.UnifiedEvent{
+					Type: ir.EventTypeCodeExecution,
+					CodeExecution: &ir.CodeExecutionPart{
+						Outcome: cer.Get("outcome").String(),
+						Output:  cer.Get("output").String(),
+					},
+					ThoughtSignature: ts,
+				})
+			} else if ts != "" {
+				// Part with only thought signature
+				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: "", ThoughtSignature: ts})
+			}
+		}
+
+		if fr := candidate.Get("finishReason"); fr.Exists() {
+			frStr := fr.String()
+			finishReason = ir.MapGeminiFinishReason(frStr)
+
+			// Handle MALFORMED_FUNCTION_CALL - extract tool call from finishMessage
+			if frStr == "MALFORMED_FUNCTION_CALL" {
+				if fm := candidate.Get("finishMessage"); fm.Exists() {
+					if funcName, argsJSON, ok := ir.ParseMalformedFunctionCall(fm.String()); ok {
+						// Normalize args if schema context available
+						if schemaCtx != nil {
+							argsJSON = schemaCtx.NormalizeToolCallArgs(funcName, argsJSON)
+						}
+						events = append(events, ir.UnifiedEvent{
+							Type: ir.EventTypeToolCall,
+							ToolCall: &ir.ToolCall{
+								ID:   ir.GenToolCallID(),
+								Name: funcName,
+								Args: argsJSON,
+							},
+							ToolCallIndex: toolCallIndex,
+						})
+						toolCallIndex++
+					}
+				}
+			}
+		}
+	}
+
+	var groundingMeta *ir.GroundingMetadata
+	if gm := parsed.Get("groundingMetadata"); gm.Exists() {
+		groundingMeta = parseGroundingMetadata(gm)
+	}
+
+	// Emit Finish event ONLY if we have an explicit finish reason from Gemini.
+	if finishReason != "" {
+		// Gemini returns STOP for both normal completion and tool calls.
+		// Override to ToolCalls if we have any tool call events in this chunk.
+		if finishReason == ir.FinishReasonStop {
+			for _, ev := range events {
+				if ev.Type == ir.EventTypeToolCall {
+					finishReason = ir.FinishReasonToolCalls
+					break
+				}
+			}
+		}
+
+		// Parse logprobs from candidate if present
+		var logprobs interface{}
+		if candidates := parsed.Get("candidates").Array(); len(candidates) > 0 {
+			logprobs = parseGeminiLogprobs(candidates[0])
+		}
+
+		events = append(events, ir.UnifiedEvent{
+			Type:              ir.EventTypeFinish,
+			Usage:             usage,
+			FinishReason:      finishReason,
+			GroundingMetadata: groundingMeta,
+			Logprobs:          logprobs,
+		})
+	}
+
+	return events, nil
+}
+
+// parseGroundingMetadata extracts search grounding information from Gemini response.
+func parseGroundingMetadata(gm gjson.Result) *ir.GroundingMetadata {
+	meta := &ir.GroundingMetadata{}
+
+	// Search entry point (rendered HTML for search widget)
+	if sep := gm.Get("searchEntryPoint"); sep.Exists() {
+		meta.SearchEntryPoint = &ir.SearchEntryPoint{
+			RenderedContent: sep.Get("renderedContent").String(),
+		}
+	}
+
+	// Grounding chunks (source URLs/titles)
+	if chunks := gm.Get("groundingChunks"); chunks.Exists() && chunks.IsArray() {
+		for _, chunk := range chunks.Array() {
+			gc := ir.GroundingChunk{}
+			if web := chunk.Get("web"); web.Exists() {
+				gc.Web = &ir.WebGrounding{
+					URI:   web.Get("uri").String(),
+					Title: web.Get("title").String(),
+				}
+			}
+			meta.GroundingChunks = append(meta.GroundingChunks, gc)
+		}
+	}
+
+	// Web search queries
+	if queries := gm.Get("webSearchQueries"); queries.Exists() && queries.IsArray() {
+		for _, q := range queries.Array() {
+			meta.WebSearchQueries = append(meta.WebSearchQueries, q.String())
+		}
+	}
+
+	return meta
+}
+
+// --- Helper Functions ---
+
+func parseGeminiMeta(parsed gjson.Result) *ir.ResponseMeta {
+	meta := &ir.ResponseMeta{}
+	if rid := parsed.Get("responseId"); rid.Exists() {
+		meta.ResponseID = rid.String()
+	}
+	if ct := parsed.Get("createTime"); ct.Exists() {
+		if t, err := time.Parse(time.RFC3339Nano, ct.String()); err == nil {
+			meta.CreateTime = t.Unix()
+		}
+	}
+	if candidates := parsed.Get("candidates").Array(); len(candidates) > 0 {
+		candidate := candidates[0]
+		if fr := candidate.Get("finishReason"); fr.Exists() {
+			meta.NativeFinishReason = fr.String()
+		}
+		// Parse logprobs from first candidate
+		meta.Logprobs = parseGeminiLogprobs(candidate)
+	}
+	return meta
+}
+
+func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
+	u := parsed.Get("usageMetadata")
+	if !u.Exists() {
+		return nil
+	}
+	promptTokens := int(u.Get("promptTokenCount").Int())
+	thoughtsTokens := int(u.Get("thoughtsTokenCount").Int())
+	return &ir.Usage{
+		PromptTokens:       promptTokens + thoughtsTokens,
+		CompletionTokens:   int(u.Get("candidatesTokenCount").Int()),
+		TotalTokens:        int(u.Get("totalTokenCount").Int()),
+		ThoughtsTokenCount: thoughtsTokens,
+	}
+}
+
+// parseGeminiLogprobs extracts logprobs from Gemini candidate and converts to OpenAI format.
+// Gemini returns avgLogprobs (float) and logprobsResult (detailed per-token).
+func parseGeminiLogprobs(candidate gjson.Result) interface{} {
+	// Check if logprobsResult exists (detailed per-token logprobs)
+	if lr := candidate.Get("logprobsResult"); lr.Exists() {
+		return convertGeminiLogprobsToOpenAI(lr)
+	}
+	// Fall back to avgLogprobs if available
+	if avg := candidate.Get("avgLogprobs"); avg.Exists() {
+		// OpenAI doesn't have avgLogprobs equivalent, but we can include it
+		return map[string]interface{}{
+			"avg_logprob": avg.Float(),
+		}
+	}
+	return nil
+}
+
+// convertGeminiLogprobsToOpenAI converts Gemini logprobsResult to OpenAI logprobs format.
+// Gemini format: {"chosenCandidates": [{"token": "...", "logProbability": -0.5, ...}], "topCandidates": [...]}
+// OpenAI format: {"content": [{"token": "...", "logprob": -0.5, "top_logprobs": [...]}]}
+func convertGeminiLogprobsToOpenAI(lr gjson.Result) map[string]interface{} {
+	var content []interface{}
+
+	// Parse chosen candidates (the actual tokens in the response)
+	chosenCandidates := lr.Get("chosenCandidates")
+	topCandidates := lr.Get("topCandidates")
+
+	if chosenCandidates.Exists() && chosenCandidates.IsArray() {
+		for i, chosen := range chosenCandidates.Array() {
+			tokenEntry := map[string]interface{}{
+				"token":   chosen.Get("token").String(),
+				"logprob": chosen.Get("logProbability").Float(),
+			}
+
+			// Add top_logprobs if available
+			if topCandidates.Exists() && topCandidates.IsArray() {
+				topArr := topCandidates.Array()
+				if i < len(topArr) {
+					var topLogprobs []interface{}
+					if candidates := topArr[i].Get("candidates"); candidates.Exists() && candidates.IsArray() {
+						for _, c := range candidates.Array() {
+							topLogprobs = append(topLogprobs, map[string]interface{}{
+								"token":   c.Get("token").String(),
+								"logprob": c.Get("logProbability").Float(),
+							})
+						}
+					}
+					if len(topLogprobs) > 0 {
+						tokenEntry["top_logprobs"] = topLogprobs
+					}
+				}
+			}
+
+			content = append(content, tokenEntry)
+		}
+	}
+
+	if len(content) == 0 {
+		return nil
+	}
+	return map[string]interface{}{"content": content}
+}
+
+func parseGeminiInlineImage(part gjson.Result) *ir.ImagePart {
+	inlineData := part.Get("inlineData")
+	if !inlineData.Exists() {
+		inlineData = part.Get("inline_data")
+	}
+	if !inlineData.Exists() {
+		return nil
+	}
+	data := inlineData.Get("data").String()
+	if data == "" {
+		return nil
+	}
+	mimeType := inlineData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inlineData.Get("mime_type").String()
+	}
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	return &ir.ImagePart{MimeType: mimeType, Data: data}
+}
