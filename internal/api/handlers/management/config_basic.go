@@ -8,19 +8,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/util"
 	sdkconfig "github.com/nghyane/llm-mux/sdk/config"
-	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	latestReleaseURL       = "https://api.github.com/repos/nghyane/llm-mux/releases/latest"
 	latestReleaseUserAgent = "llm-mux"
+	latestVersionCacheTTL  = 15 * time.Minute
+)
+
+// Cache for latest version to avoid hitting GitHub rate limits
+var (
+	latestVersionCache   string
+	latestVersionCacheAt time.Time
+	latestVersionMu      sync.RWMutex
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -38,7 +46,44 @@ type releaseInfo struct {
 }
 
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
+// Results are cached for 15 minutes to avoid hitting GitHub rate limits.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
+	// Check cache first
+	latestVersionMu.RLock()
+	if latestVersionCache != "" && time.Since(latestVersionCacheAt) < latestVersionCacheTTL {
+		cached := latestVersionCache
+		latestVersionMu.RUnlock()
+		c.JSON(http.StatusOK, gin.H{"latest-version": cached, "cached": true})
+		return
+	}
+	latestVersionMu.RUnlock()
+
+	// Fetch from GitHub
+	version, err := h.fetchLatestVersion(c)
+	if err != nil {
+		// Return cached version if available, even if expired
+		latestVersionMu.RLock()
+		if latestVersionCache != "" {
+			cached := latestVersionCache
+			latestVersionMu.RUnlock()
+			c.JSON(http.StatusOK, gin.H{"latest-version": cached, "cached": true, "stale": true})
+			return
+		}
+		latestVersionMu.RUnlock()
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update cache
+	latestVersionMu.Lock()
+	latestVersionCache = version
+	latestVersionCacheAt = time.Now()
+	latestVersionMu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{"latest-version": version})
+}
+
+func (h *Handler) fetchLatestVersion(c *gin.Context) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
 	if h != nil && h.cfg != nil {
@@ -51,37 +96,28 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
-		return
+		return "", fmt.Errorf("request_create_failed: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", latestReleaseUserAgent)
-	// Use GitHub token from env to increase rate limit (60/hr → 5000/hr)
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request_failed", "message": err.Error()})
-		return
+		return "", fmt.Errorf("request_failed: %w", err)
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.WithError(errClose).Debug("failed to close latest version response body")
-		}
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected_status", "message": fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))})
-		return
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var info releaseInfo
 	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "decode_failed", "message": errDecode.Error()})
-		return
+		return "", fmt.Errorf("decode_failed: %w", errDecode)
 	}
 
 	version := strings.TrimSpace(info.TagName)
@@ -89,11 +125,10 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		version = strings.TrimSpace(info.Name)
 	}
 	if version == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_response", "message": "missing release version"})
-		return
+		return "", fmt.Errorf("missing release version")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"latest-version": version})
+	return version, nil
 }
 
 func WriteConfig(path string, data []byte) error {
