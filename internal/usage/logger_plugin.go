@@ -18,13 +18,15 @@ var statisticsEnabled atomic.Bool
 
 func init() {
 	statisticsEnabled.Store(true)
-	coreusage.RegisterPlugin(NewLoggerPlugin())
+	defaultLoggerPlugin = NewLoggerPlugin()
+	coreusage.RegisterPlugin(defaultLoggerPlugin)
 }
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
 type LoggerPlugin struct {
-	stats *RequestStatistics
+	stats     *RequestStatistics
+	persister *Persister
 }
 
 // NewLoggerPlugin constructs a new logger plugin instance.
@@ -47,6 +49,43 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	p.stats.Record(ctx, record)
+
+	// Enqueue to persister if enabled
+	if p.persister != nil {
+		timestamp := record.RequestedAt
+		if timestamp.IsZero() {
+			timestamp = time.Now()
+		}
+		detail := normaliseDetail(record.Detail)
+		statsKey := record.APIKey
+		if statsKey == "" {
+			statsKey = resolveAPIIdentifier(ctx, record)
+		}
+		failed := record.Failed
+		if !failed {
+			failed = !resolveSuccess(ctx)
+		}
+		modelName := record.Model
+		if modelName == "" {
+			modelName = "unknown"
+		}
+
+		p.persister.Enqueue(UsageRecord{
+			Provider:        record.Provider,
+			Model:           modelName,
+			APIKey:          statsKey,
+			AuthID:          "", // Can be extracted from context if needed
+			AuthIndex:       record.AuthIndex,
+			Source:          record.Source,
+			RequestedAt:     timestamp,
+			Failed:          failed,
+			InputTokens:     detail.InputTokens,
+			OutputTokens:    detail.OutputTokens,
+			ReasoningTokens: detail.ReasoningTokens,
+			CachedTokens:    detail.CachedTokens,
+			TotalTokens:     detail.TotalTokens,
+		})
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -54,6 +93,43 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
+
+// InitializePersistence initializes SQLite persistence for usage records.
+// It loads historical records from the database to rebuild in-memory stats.
+// Returns an error if persistence fails to initialize, but this should not stop the server.
+func InitializePersistence(dbPath string, batchSize, flushIntervalSecs, retentionDays int) error {
+	if dbPath == "" {
+		return nil // Persistence disabled
+	}
+
+	persister, err := NewPersister(dbPath, batchSize, flushIntervalSecs, retentionDays)
+	if err != nil {
+		return fmt.Errorf("failed to initialize persister: %w", err)
+	}
+
+	// Load historical records from database
+	if persister.db != nil {
+		if err := LoadRecordsFromDB(persister.db, retentionDays, defaultRequestStatistics); err != nil {
+			// Log warning but don't fail - we can continue with empty stats
+			fmt.Printf("[WARN] Failed to load historical usage records: %v\n", err)
+		}
+	}
+
+	// Attach persister to the default logger plugin
+	if defaultLoggerPlugin != nil {
+		defaultLoggerPlugin.persister = persister
+	}
+
+	return nil
+}
+
+// StopPersistence gracefully shuts down the persister, flushing pending writes.
+func StopPersistence() error {
+	if defaultLoggerPlugin != nil && defaultLoggerPlugin.persister != nil {
+		return defaultLoggerPlugin.persister.Stop()
+	}
+	return nil
+}
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
@@ -142,9 +218,13 @@ type ModelSnapshot struct {
 }
 
 var defaultRequestStatistics = NewRequestStatistics()
+var defaultLoggerPlugin *LoggerPlugin
 
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
+
+// GetLoggerPlugin returns the shared logger plugin instance.
+func GetLoggerPlugin() *LoggerPlugin { return defaultLoggerPlugin }
 
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {

@@ -41,6 +41,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsagePersistence defines SQLite persistence settings for usage statistics.
+	UsagePersistence UsagePersistence `yaml:"usage-persistence" json:"usage-persistence"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -122,6 +125,24 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// UsagePersistence defines SQLite persistence settings for usage statistics.
+type UsagePersistence struct {
+	// Enabled toggles SQLite persistence for usage records.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// DBPath is the filesystem path to the SQLite database file.
+	DBPath string `yaml:"db-path" json:"db-path"`
+
+	// BatchSize defines the number of records to batch before writing to database.
+	BatchSize int `yaml:"batch-size" json:"batch-size"`
+
+	// FlushIntervalSecs defines how often to flush pending writes (in seconds).
+	FlushIntervalSecs int `yaml:"flush-interval" json:"flush-interval"`
+
+	// RetentionDays defines how many days of records to keep before cleanup.
+	RetentionDays int `yaml:"retention-days" json:"retention-days"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.

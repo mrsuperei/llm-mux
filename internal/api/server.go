@@ -784,6 +784,11 @@ func (s *Server) Stop(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
+	// Stop usage persistence and flush pending writes
+	if err := usage.StopPersistence(); err != nil {
+		log.Warnf("Failed to stop usage persistence: %v", err)
+	}
+
 	log.Debug("API server stopped")
 	return nil
 }

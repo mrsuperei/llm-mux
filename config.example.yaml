@@ -38,6 +38,19 @@ logging-to-file: false
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Usage persistence settings
+usage-persistence:
+  # Enable SQLite persistence for usage records
+  enabled: false
+  # Database file path (supports ~ for home directory)
+  db-path: "~/.config/llm-mux/usage.db"
+  # Number of records to batch before writing to database
+  batch-size: 100
+  # Flush pending writes every N seconds
+  flush-interval: 5
+  # Keep records for N days before cleanup
+  retention-days: 30
+
 # When true, display provider prefixes in model IDs (e.g., "[Gemini CLI] gemini-2.5-pro")
 # This is purely visual and does not affect model routing to providers
 show-provider-prefixes: false

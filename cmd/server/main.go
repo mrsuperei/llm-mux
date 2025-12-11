@@ -415,6 +415,19 @@ func main() {
 		}
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+
+	// Initialize usage persistence if enabled
+	if cfg.UsagePersistence.Enabled {
+		if err := usage.InitializePersistence(
+			cfg.UsagePersistence.DBPath,
+			cfg.UsagePersistence.BatchSize,
+			cfg.UsagePersistence.FlushIntervalSecs,
+			cfg.UsagePersistence.RetentionDays,
+		); err != nil {
+			log.Warnf("Failed to initialize usage persistence: %v", err)
+		}
+	}
+
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
