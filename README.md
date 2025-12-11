@@ -254,6 +254,10 @@ Logs: `journalctl --user -u llm-mux`
    - Converts back to original request format
 5. **Quota Handling**: Automatically routes to alternative providers when quotas are exceeded
 
+## Credits
+
+Refactored from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with redesigned IR translator, improved load balancing, and enhanced error handling.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE)
