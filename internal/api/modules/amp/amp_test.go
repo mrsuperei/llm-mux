@@ -26,7 +26,7 @@ func TestAmpModule_New(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	authMiddleware := func(c *gin.Context) { c.Next() }
 
-	m := NewLegacy(accessManager, authMiddleware)
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(authMiddleware))
 
 	if m.accessManager != accessManager {
 		t.Fatal("accessManager not set")
@@ -53,7 +53,7 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -85,7 +85,7 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -122,7 +122,7 @@ func TestAmpModule_Register_InvalidUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -246,7 +246,7 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	// Config with explicit API key
 	cfg := &config.Config{
@@ -293,7 +293,7 @@ func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 			accessManager := sdkaccess.NewManager()
 			base := &handlers.BaseAPIHandler{}
 
-			m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+			m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 			cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: scenario.configURL}}
 

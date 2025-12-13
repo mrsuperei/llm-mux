@@ -129,9 +129,7 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 // SetClients and SetAPIKeyClients removed; watcher manages its own caches
 
 // SnapshotClients returns the current combined clients snapshot from the underlying watcher.
-// SnapshotClients removed; use SnapshotAuths
-
-// SnapshotAuths returns the current auth entries derived from legacy clients.
+// SnapshotAuths returns the current auth entries.
 func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 	if w == nil || w.snapshotAuths == nil {
 		return nil

@@ -277,8 +277,8 @@ func (r *Registry) cleanup() {
 	}
 }
 
-// Create creates a new OAuth request with a given state (for backward compatibility).
-// Unlike Register(), this allows specifying the state parameter directly.
+// Create creates a new OAuth request with a given state.
+// Used to explicitly set the state parameter during OAuth flow initiation.
 func (r *Registry) Create(state, provider string, mode RequestMode) *OAuthRequest {
 	now := time.Now()
 	id := state // Use state as ID for simplicity
@@ -302,7 +302,8 @@ func (r *Registry) Create(state, provider string, mode RequestMode) *OAuthReques
 	return req
 }
 
-// Delete removes a request from the registry (alias for Remove for backward compatibility).
+// Delete removes a request from the registry.
+// This is an alias for Remove for API consistency.
 func (r *Registry) Delete(state string) {
 	r.Remove(state)
 }

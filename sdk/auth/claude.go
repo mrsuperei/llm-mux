@@ -9,7 +9,6 @@ import (
 
 	"github.com/nghyane/llm-mux/internal/auth/claude"
 	"github.com/nghyane/llm-mux/internal/browser"
-	// legacy client removed
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/misc"
 	"github.com/nghyane/llm-mux/internal/util"

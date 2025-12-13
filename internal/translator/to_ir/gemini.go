@@ -295,7 +295,7 @@ func ParseGeminiResponse(rawJSON []byte) (*ir.UnifiedChatRequest, []ir.Message, 
 
 // ParseGeminiResponseCandidates parses all candidates from Gemini response.
 // Use this when candidateCount > 1 to get multiple alternative responses.
-func ParseGeminiResponseCandidates(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.CandidateResult, *ir.Usage, *ir.ResponseMeta, error) {
+func ParseGeminiResponseCandidates(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.CandidateResult, *ir.Usage, *ir.OpenAIMeta, error) {
 	if err := ir.ValidateJSON(rawJSON); err != nil {
 		return nil, nil, nil, err
 	}
@@ -392,13 +392,13 @@ func parseGeminiCandidate(candidate gjson.Result, schemaCtx *ir.ToolSchemaContex
 
 // ParseGeminiResponseMeta parses a non-streaming Gemini API response into unified format with metadata.
 // Returns messages, usage, and response metadata (responseId, createTime, nativeFinishReason).
-func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
+func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.OpenAIMeta, error) {
 	return ParseGeminiResponseMetaWithContext(rawJSON, nil)
 }
 
 // ParseGeminiResponseMetaWithContext parses a non-streaming Gemini API response with schema context.
 // The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
-func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
+func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.Message, *ir.Usage, *ir.OpenAIMeta, error) {
 	if err := ir.ValidateJSON(rawJSON); err != nil {
 		return nil, nil, nil, err
 	}
@@ -704,8 +704,8 @@ func parseGroundingMetadata(gm gjson.Result) *ir.GroundingMetadata {
 
 // --- Helper Functions ---
 
-func parseGeminiMeta(parsed gjson.Result) *ir.ResponseMeta {
-	meta := &ir.ResponseMeta{}
+func parseGeminiMeta(parsed gjson.Result) *ir.OpenAIMeta {
+	meta := &ir.OpenAIMeta{}
 	if rid := parsed.Get("responseId"); rid.Exists() {
 		meta.ResponseID = rid.String()
 	}

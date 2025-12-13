@@ -25,7 +25,7 @@ func registerModelsForAuth(a *coreauth.Auth, cfg *config.Config) {
 			return
 		}
 	}
-	// Unregister legacy client ID (if present) to avoid double counting
+	// Unregister previous client ID (if present) to avoid double counting
 	if a.Runtime != nil {
 		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
 			if rid := idGetter.GetClientID(); rid != "" && rid != a.ID {

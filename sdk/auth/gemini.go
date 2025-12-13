@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/nghyane/llm-mux/internal/auth/gemini"
-	// legacy client removed
 	"github.com/nghyane/llm-mux/internal/config"
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 )

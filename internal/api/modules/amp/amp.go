@@ -63,16 +63,6 @@ func New(opts ...Option) *AmpModule {
 	return m
 }
 
-// NewLegacy creates a new Amp routing module using the legacy constructor signature.
-// This is provided for backwards compatibility.
-//
-// DEPRECATED: Use New with options instead.
-func NewLegacy(accessManager *sdkaccess.Manager, authMiddleware gin.HandlerFunc) *AmpModule {
-	return New(
-		WithAccessManager(accessManager),
-		WithAuthMiddleware(authMiddleware),
-	)
-}
 
 // WithSecretSource sets a custom secret source for the module.
 func WithSecretSource(source SecretSource) Option {

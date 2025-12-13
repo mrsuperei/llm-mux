@@ -8,7 +8,6 @@ import (
 
 	"github.com/nghyane/llm-mux/internal/auth/qwen"
 	"github.com/nghyane/llm-mux/internal/browser"
-	// legacy client removed
 	"github.com/nghyane/llm-mux/internal/config"
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -94,8 +93,6 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	}
 
 	tokenStorage.Email = email
-
-	// no legacy client construction
 
 	fileName := fmt.Sprintf("qwen-%s.json", tokenStorage.Email)
 	metadata := map[string]any{

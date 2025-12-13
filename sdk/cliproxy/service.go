@@ -70,7 +70,7 @@ type Service struct {
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
 
-	// authManager handles legacy authentication operations.
+	// authManager handles authentication operations.
 	authManager *sdkAuth.Manager
 
 	// accessManager handles request authentication providers.
@@ -409,9 +409,6 @@ func (s *Service) Run(ctx context.Context) error {
 		apiKeyResult = &APIKeyClientResult{}
 	}
 
-	// legacy clients removed; no caches to refresh
-
-	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 
 	if s.authManager == nil {
@@ -532,8 +529,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			ctx = context.Background()
 		}
 
-		// legacy refresh loop removed; only stopping core auth manager below
-
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
@@ -558,8 +553,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop()
 			s.authQueueStop = nil
 		}
-
-		// no legacy clients to persist
 
 		if s.server != nil {
 			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

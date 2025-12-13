@@ -35,7 +35,7 @@ type Builder struct {
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
 
-	// authManager handles legacy authentication operations.
+	// authManager handles authentication operations.
 	authManager *sdkAuth.Manager
 
 	// accessManager handles request authentication providers.

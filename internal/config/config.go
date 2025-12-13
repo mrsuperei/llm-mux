@@ -61,9 +61,6 @@ type Config struct {
 	// DisableAuth disables API key authentication for all endpoints (Ollama compatibility mode).
 	DisableAuth bool `yaml:"disable-auth" json:"disable-auth"`
 
-	// GlAPIKey exposes the legacy generative language API key list for backward compatibility.
-	GlAPIKey []string `yaml:"generative-language-api-key" json:"generative-language-api-key"`
-
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -659,7 +656,6 @@ func sanitizeConfigForPersist(cfg *Config) *Config {
 	clone := *cfg
 	clone.SDKConfig = cfg.SDKConfig
 	clone.SDKConfig.Access = config.AccessConfig{}
-	clone.GlAPIKey = nil
 	return &clone
 }
 

@@ -88,9 +88,6 @@ type OpenAIMeta struct {
 	Logprobs           any
 }
 
-// ResponseMeta is an alias for OpenAIMeta for backward compatibility.
-// Deprecated: Use OpenAIMeta directly instead.
-type ResponseMeta = OpenAIMeta
 
 // CandidateResult holds the result of a single candidate/choice from the model.
 // Used when candidateCount/n > 1 to return multiple alternatives.
