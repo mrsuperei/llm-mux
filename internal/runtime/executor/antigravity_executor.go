@@ -878,6 +878,11 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	}
 
 	if strings.Contains(modelName, "claude") {
+		// Schema cleanup for Vertex AI Claude API (OpenAPI 3.0 subset)
+		// Vertex AI Claude supports: type, properties, description, required, anyOf
+		// Does NOT support: $schema, $ref, $defs, exclusiveMin/Max
+		// Ignores (but accepts): minItems, maxItems, minLength, maxLength
+
 		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
 			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
 				if funcDecl.Get("parametersJsonSchema").Exists() {
@@ -891,28 +896,22 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		})
 
 		strJSON := string(template)
+		// Remove unsupported JSON Schema fields (based on Vertex AI OpenAPI 3.0 subset)
 		strJSON = util.DeleteKey(strJSON, "request.generationConfig.maxOutputTokens")
 		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.$schema")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.maxItems")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.minItems")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.minLength")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.maxLength")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.exclusiveMinimum")
-		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.exclusiveMaximum")
 		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.$ref")
 		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.$defs")
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.exclusiveMinimum")
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.exclusiveMaximum")
 
-		paths := make([]string, 0)
-		util.Walk(gjson.Parse(strJSON), "", "anyOf", &paths)
-		for _, p := range paths {
-			anyOf := gjson.Get(strJSON, p)
-			if anyOf.IsArray() {
-				anyOfItems := anyOf.Array()
-				if len(anyOfItems) > 0 {
-					strJSON, _ = sjson.SetRaw(strJSON, p[:len(p)-len(".anyOf")], anyOfItems[0].Raw)
-				}
-			}
-		}
+		// Optional: Remove validation constraints (ignored by Vertex AI but safe to keep)
+		// Removing them keeps schema minimal and avoids potential future issues
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.minItems")
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.maxItems")
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.minLength")
+		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.maxLength")
+
+		// NOTE: anyOf is SUPPORTED by Vertex AI Claude - do NOT remove it
 		template = strJSON
 
 	} else {
