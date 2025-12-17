@@ -2,6 +2,7 @@ package from_ir
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -101,6 +102,18 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 		}
 	}
 
+	// Check if thinking is enabled for this request
+	thinkingEnabled := false
+	if req.Thinking != nil {
+		budget := int32(0)
+		if req.Thinking.ThinkingBudget != nil {
+			budget = *req.Thinking.ThinkingBudget
+		}
+		if (req.Thinking.IncludeThoughts && budget != 0) || (budget > 0) {
+			thinkingEnabled = true
+		}
+	}
+
 	var messages []any
 	for _, msg := range req.Messages {
 		switch msg.Role {
@@ -109,7 +122,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 				root["system"] = text
 			}
 		case ir.RoleUser:
-			if parts := buildClaudeContentParts(msg, false); len(parts) > 0 {
+			if parts := buildClaudeContentParts(msg, false, false); len(parts) > 0 {
 				msgObj := map[string]any{"role": ir.ClaudeRoleUser, "content": parts}
 				// Add cache_control if present
 				if msg.CacheControl != nil {
@@ -122,7 +135,8 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 				messages = append(messages, msgObj)
 			}
 		case ir.RoleAssistant:
-			if parts := buildClaudeContentParts(msg, true); len(parts) > 0 {
+			// Pass thinkingEnabled to inject placeholder if needed
+			if parts := buildClaudeContentParts(msg, true, thinkingEnabled); len(parts) > 0 {
 				msgObj := map[string]any{"role": ir.ClaudeRoleAssistant, "content": parts}
 				// Add cache_control if present
 				if msg.CacheControl != nil {
@@ -312,7 +326,7 @@ func ToClaudeResponse(messages []ir.Message, usage *ir.Usage, model, messageID s
 	return json.Marshal(response)
 }
 
-func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []any {
+func buildClaudeContentParts(msg ir.Message, includeToolCalls bool, thinkingEnabled bool) []any {
 	// Pre-allocate with estimated capacity
 	capacity := len(msg.Content)
 	if includeToolCalls {
@@ -332,13 +346,19 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []any {
 		}
 	}
 
-	// Claude Protocol: If we have tool calls but no thinking, inject a placeholder thinking block
-	// This satisfies the requirement: "assistant message must start with a thinking block (preceeding tool_use)"
-	if includeToolCalls && len(msg.ToolCalls) > 0 && !hasThinking {
+	// Claude Protocol: If Thinking is enabled and we have tool calls but no thinking,
+	// we MUST inject a thinking block at the START of the message.
+	// This satisfies: "assistant message must start with a thinking block (preceeding tool_use)"
+	// We use "redacted_thinking" which is safer for history where we don't have the real thought.
+	if thinkingEnabled && includeToolCalls && len(msg.ToolCalls) > 0 && !hasThinking {
 		parts = append(parts, map[string]any{
-			"type":     ir.ClaudeBlockThinking,
-			"thinking": "[Thinking content not available from upstream model]",
+			"type": "redacted_thinking",
+			"data": base64.StdEncoding.EncodeToString([]byte("redacted_by_proxy_for_protocol_compliance")),
 		})
+	} else if includeToolCalls && len(msg.ToolCalls) > 0 && !hasThinking {
+		// Even if thinking is NOT enabled for *this* request, if the model has previously used thinking,
+		// it might be safer to include a placeholder if we are in "thinking mode".
+		// But for now, only strictly enforce if thinkingEnabled=true for the current request.
 	}
 
 	for i := range msg.Content {
