@@ -1,8 +1,15 @@
 package util
 
 import (
+	"strings"
+
 	"github.com/nghyane/llm-mux/internal/registry"
 )
+
+// DefaultThinkingBudget is the safe default budget for auto-enabling thinking.
+// Provide a fixed value (e.g. 1024) instead of dynamic (-1) because some upstream
+// providers (e.g. Antigravity/Google) rely on fixed budgets for mapped models like Claude.
+const DefaultThinkingBudget = 1024
 
 // ModelSupportsThinking reports whether the given model has Thinking capability
 // according to the model registry metadata (provider-agnostic).
@@ -56,12 +63,32 @@ func NormalizeThinkingBudget(model string, budget int) int {
 	return budget
 }
 
+// GetAutoAppliedThinkingConfig returns the default thinking configuration for a model
+// if it should be auto-applied (e.g. model supports thinking but no explicit config found).
+// Returns (budget, include_thoughts, should_apply).
+func GetAutoAppliedThinkingConfig(model string) (int, bool, bool) {
+	if ModelSupportsThinking(model) {
+		// Use fixed budget (1024) instead of dynamic (-1) as upstream might not support dynamic for Claude
+		// or other mapped models.
+		return DefaultThinkingBudget, true, true
+	}
+	return 0, false, false
+}
+
 // thinkingRangeFromRegistry attempts to read thinking ranges from the model registry.
 func thinkingRangeFromRegistry(model string) (found bool, min int, max int, zeroAllowed bool, dynamicAllowed bool) {
 	if model == "" {
 		return false, 0, 0, false, false
 	}
-	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	lower := strings.ToLower(model)
+	// Try exact match first, then registry lookup
+	// (Note: GetGlobalRegistry().GetModelInfo handles normalization usually, but safety check)
+	info := registry.GetGlobalRegistry().GetModelInfo(lower)
+	if info == nil {
+		// Try original model string if lower fail
+		info = registry.GetGlobalRegistry().GetModelInfo(model)
+	}
+
 	if info == nil || info.Thinking == nil {
 		return false, 0, 0, false, false
 	}

@@ -163,6 +163,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if len(chunk) > 0 {
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
+				// log.Debugf("Flushed claude chunk: %d bytes", len(chunk))
 			}
 
 		case errMsg, ok := <-errs:

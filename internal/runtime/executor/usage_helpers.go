@@ -457,33 +457,45 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 	}
 
 	lines := bytes.Split(payload, []byte("\n"))
+	var outputLines [][]byte
 	modified := false
 	foundData := false
-	for idx, line := range lines {
+
+	for _, line := range lines {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !bytes.HasPrefix(trimmed, []byte("data:")) {
+			outputLines = append(outputLines, line)
 			continue
 		}
 		foundData = true
 		dataIdx := bytes.Index(line, []byte("data:"))
 		if dataIdx < 0 {
+			outputLines = append(outputLines, line)
 			continue
 		}
 		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
+		// Skip data payloads that are empty or whitespace-only
+		if len(rawJSON) == 0 {
+			outputLines = append(outputLines, line)
+			continue
+		}
 		traceID := gjson.GetBytes(rawJSON, "traceId").String()
 		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
 			rememberStopWithoutUsage(traceID)
+			modified = true
 			continue
 		}
 		if traceID != "" {
 			if _, ok := stopChunkWithoutUsage.Load(traceID); ok && hasUsageMetadata(rawJSON) {
 				stopChunkWithoutUsage.Delete(traceID)
+				modified = true
 				continue
 			}
 		}
 
 		cleaned, changed := StripUsageMetadataFromJSON(rawJSON)
 		if !changed {
+			outputLines = append(outputLines, line)
 			continue
 		}
 		var rebuilt []byte
@@ -493,7 +505,7 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			rebuilt = append(rebuilt, ' ')
 			rebuilt = append(rebuilt, cleaned...)
 		}
-		lines[idx] = rebuilt
+		outputLines = append(outputLines, rebuilt)
 		modified = true
 	}
 	if !modified {
@@ -508,7 +520,7 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 		}
 		return payload
 	}
-	return bytes.Join(lines, []byte("\n"))
+	return bytes.Join(outputLines, []byte("\n"))
 }
 
 // StripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).

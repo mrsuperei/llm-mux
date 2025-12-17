@@ -17,12 +17,13 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
+	"github.com/nghyane/llm-mux/internal/util"
+
 	// "github.com/nghyane/llm-mux/internal/translator/ir"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -81,17 +82,17 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, fmt.Errorf("failed to translate request: %w", errTranslate)
 	}
 
-	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
-
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
+	retrier := &rateLimitRetrier{}
 
-	for idx, baseURL := range baseURLs {
-		httpReq, errReq := e.buildRequest(ctx, auth, token, req.Model, translated, false, opts.Alt, baseURL)
+	for idx := 0; idx < len(baseURLs); idx++ {
+		baseURL := baseURLs[idx]
+		httpReq, errReq := e.buildRequest(ctx, auth, token, req.Model, translated, req.Metadata, false, opts.Alt, baseURL)
 		if errReq != nil {
 			err = errReq
 			return resp, err
@@ -124,9 +125,24 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
-			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
+			if httpResp.StatusCode == http.StatusTooManyRequests {
+				hasNextBaseURL := idx+1 < len(baseURLs)
+				if hasNextBaseURL {
+					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				}
+				action, ctxErr := retrier.handleRateLimit(ctx, hasNextBaseURL, bodyBytes)
+				if ctxErr != nil {
+					err = ctxErr
+					return resp, err
+				}
+				switch action {
+				case rateLimitActionContinue:
+					continue
+				case rateLimitActionRetry:
+					idx--
+					continue
+				}
+				// rateLimitActionMaxExceeded - fall through to error
 			}
 			err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 			return resp, err
@@ -183,7 +199,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, fmt.Errorf("failed to translate request: %w", errTranslate)
 	}
 
-	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+	// Debug trace: log final request payload for Claude thinking models
+	if debugThinking {
+		logThinkingRequest(translated, req.Model)
+	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -191,9 +210,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
+	retrier := &rateLimitRetrier{}
 
-	for idx, baseURL := range baseURLs {
-		httpReq, errReq := e.buildRequest(ctx, auth, token, req.Model, translated, true, opts.Alt, baseURL)
+	for idx := 0; idx < len(baseURLs); idx++ {
+		baseURL := baseURLs[idx]
+		httpReq, errReq := e.buildRequest(ctx, auth, token, req.Model, translated, req.Metadata, true, opts.Alt, baseURL)
 		if errReq != nil {
 			err = errReq
 			return nil, err
@@ -230,9 +251,24 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
-			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
+			if httpResp.StatusCode == http.StatusTooManyRequests {
+				hasNextBaseURL := idx+1 < len(baseURLs)
+				if hasNextBaseURL {
+					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				}
+				action, ctxErr := retrier.handleRateLimit(ctx, hasNextBaseURL, bodyBytes)
+				if ctxErr != nil {
+					err = ctxErr
+					return nil, err
+				}
+				switch action {
+				case rateLimitActionContinue:
+					continue
+				case rateLimitActionRetry:
+					idx--
+					continue
+				}
+				// rateLimitActionMaxExceeded - fall through to error
 			}
 			err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 			return nil, err
@@ -248,14 +284,26 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				}
 			}()
 			scanner := bufio.NewScanner(resp.Body)
-			scanner.Buffer(nil, DefaultStreamBufferSize)
+			scanner.Buffer(make([]byte, 64*1024), DefaultStreamBufferSize)
 
 			// Initialize streaming state with schema context from original request for tool call normalization
 			streamState := NewAntigravityStreamState(opts.OriginalRequest)
 			messageID := "chatcmpl-" + req.Model
 
 			for scanner.Scan() {
+				// Check context cancellation before processing each line
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				line := scanner.Bytes()
+
+				// Debug trace: log raw SSE for Claude thinking models
+				if debugThinking {
+					logThinkingRawSSE(line, req.Model)
+				}
 
 				// Filter usage metadata for all models
 				// Only retain usage statistics in the terminal chunk
@@ -267,6 +315,17 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					continue // Skip non-JSON lines (empty, comments, etc.)
 				}
 
+				// Debug trace: log parsed payload for Claude thinking models
+				if debugThinking {
+					logThinkingPayload(payload, req.Model)
+				}
+
+				// Validate JSON to handle malformed SSE data gracefully
+				if !gjson.ValidBytes(payload) {
+					log.Debugf("antigravity executor: skipping malformed SSE payload")
+					continue
+				}
+
 				if detail, ok := parseAntigravityStreamUsage(payload); ok {
 					reporter.publish(ctx, detail)
 				}
@@ -275,17 +334,28 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				// Pass JSON payload (not raw SSE line) for proper parsing
 				translatedChunks, errTranslateChunk := TranslateGeminiCLIResponseStream(e.cfg, from, payload, req.Model, messageID, streamState)
 				if errTranslateChunk != nil {
-					out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to translate chunk: %w", errTranslateChunk)}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to translate chunk: %w", errTranslateChunk)}:
+					case <-ctx.Done():
+						return
+					}
 					continue
 				}
 				for _, chunk := range translatedChunks {
-					out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 
 			if errScan := scanner.Err(); errScan != nil {
 				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
 			} else {
 				reporter.ensurePublished(ctx)
 			}
@@ -557,22 +627,22 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	return auth, nil
 }
 
-func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, metadata map[string]any, stream bool, alt, baseURL string) (*http.Request, error) {
 	if token == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-	base := strings.TrimSuffix(baseURL, "/")
-	if base == "" {
-		base = buildBaseURL(auth)
-	}
-	path := antigravityGeneratePath
-	if stream {
-		path = antigravityStreamPath
-	}
 	var requestURL strings.Builder
-	requestURL.WriteString(base)
-	requestURL.WriteString(path)
+	requestURL.WriteString(baseURL)
+	requestURL.WriteString("/v1beta/models/")
+	requestURL.WriteString(modelName) // Keep original model name in URL path
+
+	if stream {
+		requestURL.WriteString(":streamGenerateContent")
+	} else {
+		requestURL.WriteString(":generateContent")
+	}
+
 	if stream {
 		if alt != "" {
 			requestURL.WriteString("?$alt=")
@@ -592,8 +662,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 			projectID = strings.TrimSpace(pid)
 		}
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID)
-	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
+	payload = geminiToAntigravity(modelName, payload, projectID, metadata)
+	// Model alias mapping is now handled inside geminiToAntigravity
+	// payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
@@ -607,7 +678,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	} else {
 		httpReq.Header.Set("Accept", "application/json")
 	}
-	if host := resolveHost(base); host != "" {
+	if host := resolveHost(baseURL); host != "" {
 		httpReq.Host = host
 	}
 
@@ -745,13 +816,14 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 // Optimized: single json.Unmarshal → in-memory modifications → single json.Marshal
 // The projectID parameter should be the real GCP project ID from auth metadata.
 // If empty, a random project ID will be generated (legacy fallback).
-func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
+func geminiToAntigravity(modelName string, payload []byte, projectID string, metadata map[string]any) []byte {
 	var root map[string]any
 	if err := json.Unmarshal(payload, &root); err != nil {
 		return payload
 	}
 
-	root["model"] = modelName
+	// Optimize: Set correct model name (alias) directly to avoid external re-parsing
+	root["model"] = alias2ModelName(modelName)
 	root["userAgent"] = "antigravity"
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {
@@ -772,19 +844,64 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	request["sessionId"] = generateSessionID()
 	delete(request, "safetySettings")
 
-	if genConfig, ok := request["generationConfig"].(map[string]any); ok {
-		delete(genConfig, "maxOutputTokens")
+	// Ensure generationConfig exists for thinking logic
+	var genConfig map[string]any
+	if gc, ok := request["generationConfig"].(map[string]any); ok {
+		genConfig = gc
+	} else {
+		genConfig = make(map[string]any)
+		request["generationConfig"] = genConfig
+	}
+	delete(genConfig, "maxOutputTokens")
 
-		// Only gemini-3-* models support thinking; remove thinkingConfig for others or when disabled
-		if tc, ok := genConfig["thinkingConfig"].(map[string]any); ok {
-			keepThinking := strings.HasPrefix(modelName, "gemini-3-")
-			if budget, ok := tc["thinkingBudget"].(float64); ok && budget <= 0 {
-				keepThinking = false
-			}
-			if !keepThinking {
+	// INTELLIGENT THINKING LOGIC OPTIMIZATION:
+	// Instead of pre-processing payload string (double parse), apply thinking config directly to map here.
+
+	// 1. Determine thinking config from metadata or defaults
+	budgetOverride, includeOverride, hasThinking := util.GeminiThinkingFromMetadata(metadata)
+	if !hasThinking {
+		if budget, include, auto := util.GetAutoAppliedThinkingConfig(modelName); auto {
+			budgetOverride = &budget
+			includeOverride = &include
+			hasThinking = true
+		}
+	}
+
+	// 2. Normalize budget if applicable
+	if hasThinking && budgetOverride != nil && util.ModelSupportsThinking(modelName) {
+		norm := util.NormalizeThinkingBudget(modelName, *budgetOverride)
+		budgetOverride = &norm
+	}
+
+	// 3. Apply to map if thinking is enabled/supported
+	lowerModel := strings.ToLower(modelName)
+	supportsThinking := strings.HasPrefix(modelName, "gemini-3-") ||
+		(strings.Contains(lowerModel, "claude") && strings.Contains(lowerModel, "thinking"))
+
+	if hasThinking && supportsThinking {
+		// Create or update thinkingConfig map
+		var tc map[string]any
+		if existing, ok := genConfig["thinkingConfig"].(map[string]any); ok {
+			tc = existing
+		} else {
+			tc = make(map[string]any)
+			genConfig["thinkingConfig"] = tc
+		}
+
+		if includeOverride != nil {
+			tc["include_thoughts"] = *includeOverride
+		}
+		if budgetOverride != nil {
+			// Check for zero budget (disabled)
+			if *budgetOverride <= 0 {
 				delete(genConfig, "thinkingConfig")
+			} else {
+				tc["thinkingBudget"] = *budgetOverride
 			}
 		}
+	} else {
+		// Remove thinking config if not supported or not enabled
+		delete(genConfig, "thinkingConfig")
 	}
 
 	// Ensure all function parameters have type "object" (Gemini requirement)

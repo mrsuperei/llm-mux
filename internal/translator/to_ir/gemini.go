@@ -659,8 +659,11 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 		}
 	}
 
-	// Emit Finish event ONLY if we have an explicit finish reason from Gemini.
-	if finishReason != "" {
+	// Emit Finish event if we have an explicit finish reason from Gemini OR usage metadata (which implies end).
+	if finishReason != "" || usage != nil {
+		if finishReason == "" {
+			finishReason = ir.FinishReasonStop
+		}
 		// Gemini returns STOP for both normal completion and tool calls.
 		// Override to ToolCalls if we have any tool call events in this chunk.
 		if finishReason == ir.FinishReasonStop {
@@ -783,7 +786,7 @@ func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	promptTokens := u.Get("promptTokenCount").Int()
 	thoughtsTokens := int32(u.Get("thoughtsTokenCount").Int())
 	usage := &ir.Usage{
-		PromptTokens:       promptTokens + int64(thoughtsTokens),
+		PromptTokens:       promptTokens,
 		CompletionTokens:   u.Get("candidatesTokenCount").Int(),
 		TotalTokens:        u.Get("totalTokenCount").Int(),
 		ThoughtsTokenCount: thoughtsTokens,

@@ -31,16 +31,15 @@ type ClaudeStreamState struct {
 	Model            string
 	MessageStartSent bool
 	TextBlockStarted bool
-	TextBlockStopped bool
-	TextBlockIndex   int
-	ToolBlockCount   int
+	CurrentBlockType string // "text" or "thinking"
+	TextBlockIndex   int    // Current block index
 	HasToolCalls     bool
 	FinishSent       bool
 }
 
 // NewClaudeStreamState creates a new streaming state tracker.
 func NewClaudeStreamState() *ClaudeStreamState {
-	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0}
+	return &ClaudeStreamState{TextBlockIndex: 0}
 }
 
 // ConvertRequest transforms unified request into Claude Messages API JSON.
@@ -398,9 +397,19 @@ func formatSSE(eventType string, data any) string {
 func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
+		// Switch block if needed
+		if state.TextBlockStarted && state.CurrentBlockType != ir.ClaudeBlockText {
+			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
+				"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex,
+			}))
+			state.TextBlockStarted = false
+			state.TextBlockIndex++
+		}
+
 		idx = state.TextBlockIndex
 		if !state.TextBlockStarted {
 			state.TextBlockStarted = true
+			state.CurrentBlockType = ir.ClaudeBlockText
 			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]any{
 				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
 				"content_block": map[string]any{"type": ir.ClaudeBlockText, "text": ""},
@@ -413,14 +422,23 @@ func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamSt
 	}))
 }
 
-
 // emitThinkingDeltaTo writes thinking delta SSE to builder.
 func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
+		// Switch block if needed
+		if state.TextBlockStarted && state.CurrentBlockType != ir.ClaudeBlockThinking {
+			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
+				"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex,
+			}))
+			state.TextBlockStarted = false
+			state.TextBlockIndex++
+		}
+
 		idx = state.TextBlockIndex
 		if !state.TextBlockStarted {
 			state.TextBlockStarted = true
+			state.CurrentBlockType = ir.ClaudeBlockThinking
 			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]any{
 				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
 				"content_block": map[string]any{"type": ir.ClaudeBlockThinking, "thinking": ""},
@@ -433,19 +451,23 @@ func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *Claude
 	}))
 }
 
-
 // emitToolCallTo writes tool call SSE to builder.
 func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStreamState) {
-	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
-		state.TextBlockStopped = true
-		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
+	// Close any open content block (text or thinking)
+	if state != nil && state.TextBlockStarted {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
+			"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex,
+		}))
+		state.TextBlockStarted = false
+		state.TextBlockIndex++
+		state.CurrentBlockType = ""
 	}
 
-	idx := 1
+	idx := 0
 	if state != nil {
 		state.HasToolCalls = true
-		idx = 1 + state.ToolBlockCount
-		state.ToolBlockCount++
+		idx = state.TextBlockIndex
+		state.TextBlockIndex++
 	}
 
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]any{
@@ -464,7 +486,6 @@ func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStrea
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{"type": ir.ClaudeSSEContentBlockStop, "index": idx}))
 }
 
-
 // emitFinishTo writes finish SSE to builder.
 func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamState) {
 	stopReason := ir.ClaudeStopEndTurn
@@ -478,7 +499,6 @@ func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamS
 	result.WriteString(formatSSE(ir.ClaudeSSEMessageDelta, delta))
 	result.WriteString(formatSSE(ir.ClaudeSSEMessageStop, map[string]any{"type": ir.ClaudeSSEMessageStop}))
 }
-
 
 func errMsg(err error) string {
 	if err != nil {

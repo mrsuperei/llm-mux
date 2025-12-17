@@ -541,6 +541,11 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 		return nil, nil
 	}
 
+	// Debug trace: log parsed events for Claude thinking models
+	if debugThinking && len(events) > 0 {
+		logThinkingEvents(events, model)
+	}
+
 	// Step 2: Convert IR events to target format chunks
 	// Preallocate with capacity of events to reduce allocations
 	chunks := make([][]byte, 0, len(events))

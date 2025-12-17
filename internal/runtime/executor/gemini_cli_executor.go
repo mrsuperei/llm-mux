@@ -30,11 +30,6 @@ import (
 const (
 	codeAssistEndpoint = "https://cloudcode-pa.googleapis.com"
 	codeAssistVersion  = "v1internal"
-
-	// Rate limit retry settings: 5 retries with exponential backoff up to ~60 seconds total
-	rateLimitMaxRetries = 5
-	rateLimitBaseDelay  = 1 * time.Second  // 1s, 2s, 4s, 8s, 16s = ~31s total with exponential backoff
-	rateLimitMaxDelay   = 20 * time.Second // Cap individual delay at 20s
 )
 
 var geminiOauthScopes = []string{
@@ -294,19 +289,34 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 				for scanner.Scan() {
 					line := scanner.Bytes()
-					if detail, ok := parseGeminiCLIStreamUsage(line); ok {
+
+					// Filter usage metadata for all models (aligns with AntigravityExecutor)
+					filteredLine := FilterSSEUsageMetadata(line)
+
+					// Extract JSON payload from SSE line
+					payload := jsonPayload(filteredLine)
+					if payload == nil {
+						continue
+					}
+
+					// Validate JSON to handle malformed SSE data gracefully
+					if !gjson.ValidBytes(payload) {
+						log.Debugf("gemini cli executor: skipping malformed SSE payload")
+						continue
+					}
+
+					if detail, ok := parseGeminiCLIStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
 					}
-					if bytes.HasPrefix(line, dataTag) {
-						messageID := "chatcmpl-" + attempt
-						translatedChunks, err := TranslateGeminiCLIResponseStream(e.cfg, from, bytes.Clone(line), attempt, messageID, streamState)
-						if err != nil {
-							out <- cliproxyexecutor.StreamChunk{Err: err}
-							return
-						}
-						for _, chunk := range translatedChunks {
-							out <- cliproxyexecutor.StreamChunk{Payload: chunk}
-						}
+
+					messageID := "chatcmpl-" + attempt
+					translatedChunks, err := TranslateGeminiCLIResponseStream(e.cfg, from, payload, attempt, messageID, streamState)
+					if err != nil {
+						out <- cliproxyexecutor.StreamChunk{Err: err}
+						return
+					}
+					for _, chunk := range translatedChunks {
+						out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
@@ -674,113 +684,4 @@ func wrapTokenError(err error) error {
 	}
 	msg := err.Error()
 	return newCategorizedError(http.StatusUnauthorized, msg, nil)
-}
-
-// rateLimitRetrier handles rate limit (429) errors with exponential backoff retry logic.
-type rateLimitRetrier struct {
-	retryCount int
-}
-
-// rateLimitAction represents the action to take after handling a rate limit error.
-type rateLimitAction int
-
-const (
-	rateLimitActionContinue    rateLimitAction = iota // Continue to next model
-	rateLimitActionRetry                              // Retry same model after delay
-	rateLimitActionMaxExceeded                        // Max retries exceeded, stop
-)
-
-// handleRateLimit processes a 429 rate limit error and returns the appropriate action.
-// It handles model fallback first, then applies exponential backoff with retries.
-// Returns the action to take and waits if necessary (respecting context cancellation).
-func (r *rateLimitRetrier) handleRateLimit(ctx context.Context, hasNextModel bool, errorBody []byte) (rateLimitAction, error) {
-	// Try next model first if available
-	if hasNextModel {
-		return rateLimitActionContinue, nil
-	}
-
-	// No more models - apply exponential backoff with retries
-	if r.retryCount >= rateLimitMaxRetries {
-		log.Debug("gemini cli executor: rate limited, max retries exceeded")
-		return rateLimitActionMaxExceeded, nil
-	}
-
-	delay := r.calculateDelay(errorBody)
-	r.retryCount++
-	log.Debugf("gemini cli executor: rate limited, waiting %v before retry %d/%d", delay, r.retryCount, rateLimitMaxRetries)
-
-	select {
-	case <-ctx.Done():
-		return rateLimitActionMaxExceeded, ctx.Err()
-	case <-time.After(delay):
-	}
-
-	return rateLimitActionRetry, nil
-}
-
-// calculateDelay calculates the delay for rate limit retry with exponential backoff.
-// It first tries to use the server-provided retry delay from the error response,
-// then falls back to exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 20s).
-func (r *rateLimitRetrier) calculateDelay(errorBody []byte) time.Duration {
-	// First, try to use server-provided retry delay
-	if serverDelay, err := parseRetryDelay(errorBody); err == nil && serverDelay != nil {
-		delay := *serverDelay
-		// Add a small buffer to the server-provided delay
-		delay += 500 * time.Millisecond
-		if delay > rateLimitMaxDelay {
-			delay = rateLimitMaxDelay
-		}
-		return delay
-	}
-
-	// Fall back to exponential backoff: baseDelay * 2^retryCount
-	delay := rateLimitBaseDelay * time.Duration(1<<r.retryCount)
-	if delay > rateLimitMaxDelay {
-		delay = rateLimitMaxDelay
-	}
-	return delay
-}
-
-// parseRetryDelay extracts the retry delay from a Google API 429 error response.
-// The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
-// Handles both formats:
-//   - Object: {"error": {"details": [...]}}
-//   - Array:  [{"error": {"details": [...]}}]
-//
-// Returns the parsed duration or an error if it cannot be determined.
-func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	// Try multiple paths to handle different response formats
-	paths := []string{
-		"error.details",   // Standard: {"error": {"details": [...]}}
-		"0.error.details", // Array wrapped: [{"error": {"details": [...]}}]
-	}
-
-	var details gjson.Result
-	for _, path := range paths {
-		details = gjson.GetBytes(errorBody, path)
-		if details.Exists() && details.IsArray() {
-			break
-		}
-	}
-
-	if !details.Exists() || !details.IsArray() {
-		return nil, fmt.Errorf("no error.details found")
-	}
-
-	for _, detail := range details.Array() {
-		typeVal := detail.Get("@type").String()
-		if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
-			retryDelay := detail.Get("retryDelay").String()
-			if retryDelay != "" {
-				// Parse duration string like "0.847655010s"
-				duration, err := time.ParseDuration(retryDelay)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse duration: %w", err)
-				}
-				return &duration, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no RetryInfo found")
 }
