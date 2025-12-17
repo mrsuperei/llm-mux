@@ -854,13 +854,6 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-// geminiToAntigravity converts Gemini CLI format to Antigravity format.
-// Input is always Gemini CLI format: {"request": {"contents": [...], "generationConfig": {...}}}
-// (IR translator ensures consistent CLI format output)
-//
-// Optimized: single json.Unmarshal → in-memory modifications → single json.Marshal
-// The projectID parameter should be the real GCP project ID from auth metadata.
-// If empty, a random project ID will be generated (legacy fallback).
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
 	template, _ := sjson.Set(string(payload), "model", modelName)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
