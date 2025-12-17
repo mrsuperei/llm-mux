@@ -99,86 +99,87 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 	isClaude := strings.Contains(req.Model, "claude")
 
 	// Determine effective thinking config (handling auto-apply)
-	var effectiveThinking *ir.ThinkingConfig
-	if req.Thinking != nil {
-		effectiveThinking = req.Thinking
-	} else if util.ModelSupportsThinking(req.Model) || isClaude {
-		defaultBudget := util.DefaultThinkingBudget
-		if isClaude {
-			defaultBudget = 16000
+	// 3. Thinking Config Handling
+	// Default values
+	defaultThinkingBudget := 16000
+	if isClaude {
+		// Ensure default budget for Claude if not set
+		if req.Thinking != nil && req.Thinking.ThinkingBudget == nil {
+			b := int32(defaultThinkingBudget)
+			req.Thinking.ThinkingBudget = &b
 		}
-
-		budget, include, auto := util.GetAutoAppliedThinkingConfig(req.Model)
-		if isClaude {
-			auto = true
-			include = true
-			budget = defaultBudget
-		}
-
-		if auto {
-			b := int32(budget)
-			effectiveThinking = &ir.ThinkingConfig{
-				IncludeThoughts: include,
-				ThinkingBudget:  &b,
-			}
-		}
-	} else if isGemini3 {
-		effectiveThinking = &ir.ThinkingConfig{IncludeThoughts: true}
 	}
 
-	if effectiveThinking != nil {
-		if isGemini3 {
-			// Gemini 3 Pro uses thinking_level
+	budget, include, auto := util.GetAutoAppliedThinkingConfig(req.Model)
+	if isClaude {
+		auto = true // Always auto-apply for Claude if missing
+		include = true
+		if budget <= 0 {
+			budget = defaultThinkingBudget
+		}
+	}
+
+	// Logic for Gemini 3 vs Others
+	if isGemini3 {
+		// Gemini 3 Pro uses thinking_level if explicit thinking is requested/auto-applied
+		if req.Thinking != nil || auto {
 			tc := map[string]any{
 				"includeThoughts": true,
 			}
-			if effectiveThinking.Effort != "" {
-				switch effectiveThinking.Effort {
-				case ir.ReasoningEffortLow:
-					tc["thinking_level"] = "LOW"
-				case ir.ReasoningEffortHigh:
-					tc["thinking_level"] = "HIGH"
-				}
-			}
-			genConfig["thinkingConfig"] = tc
-		} else {
-			// Gemini 2.5 and Claude use thinking_budget
-			budget := int32(0)
-			if effectiveThinking.ThinkingBudget != nil {
-				budget = *effectiveThinking.ThinkingBudget
-			}
-			if budget > 0 {
-				budget = int32(util.NormalizeThinkingBudget(req.Model, int(budget)))
+			// Map Effort from IR or default
+			effort := ir.ReasoningEffortMedium
+			if req.Thinking != nil && req.Thinking.Effort != "" {
+				effort = req.Thinking.Effort
 			}
 
+			switch effort {
+			case ir.ReasoningEffortLow:
+				tc["thinking_level"] = "LOW"
+			case ir.ReasoningEffortHigh:
+				tc["thinking_level"] = "HIGH"
+			}
+			// Note: Gemini 3 currently uses 'thinking_level' (LOW/HIGH) instead of budget
+			// Check if we also need budget? The SDK says Budget is for 2.5/Claude.
+			genConfig["thinkingConfig"] = tc
+		}
+	} else {
+		// Auto-apply logic for Claude/Gemini 2.5
+		if genConfig["thinkingConfig"] == nil && auto {
 			includeKey := "includeThoughts"
 			if isClaude {
 				includeKey = "include_thoughts"
 			}
-
 			genConfig["thinkingConfig"] = map[string]any{
 				"thinkingBudget": budget,
-				includeKey:       true,
+				includeKey:       include,
+			}
+		}
+	}
+
+	if tc, ok := genConfig["thinkingConfig"].(map[string]any); ok {
+		// Existing MaxTokens Logic
+		b := int32(0)
+		if v, ok := tc["thinkingBudget"].(int); ok {
+			b = int32(v)
+		} else if v32, ok := tc["thinkingBudget"].(int32); ok {
+			b = v32
+		}
+
+		if b > 0 {
+			currentMax := 0
+			if v, ok := genConfig["maxOutputTokens"].(int); ok {
+				currentMax = v
+			} else if v32, ok := genConfig["maxOutputTokens"].(int32); ok {
+				currentMax = int(v32)
+			} else if req.MaxTokens != nil {
+				currentMax = *req.MaxTokens
 			}
 
-			// MaxTokens adjustment logic (MaxMinMax strategy)
-			if budget > 0 {
-				currentMax := 0
-				if v, ok := genConfig["maxOutputTokens"].(int); ok {
-					currentMax = v
-				} else if v32, ok := genConfig["maxOutputTokens"].(int32); ok {
-					currentMax = int(v32)
-				} else if req.MaxTokens != nil {
-					currentMax = *req.MaxTokens
-				}
-
-				safeMax := 32000
-				budgetInt := int(budget)
-				newMax := max(currentMax, budgetInt*2, safeMax)
-
-				if newMax > currentMax {
-					genConfig["maxOutputTokens"] = newMax
-				}
+			safeMax := 32000
+			budgetInt := int(b)
+			newMax := max(currentMax, budgetInt*2, safeMax)
+			if newMax > currentMax {
+				genConfig["maxOutputTokens"] = newMax
 			}
 		}
 	}
@@ -314,12 +315,12 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 
 			if len(msg.ToolCalls) > 0 {
 				// Claude Constraint: If using tools, MUST start with thinking block.
-				// If history lacks thinking (e.g. from non-thinking model), inject shim.
-				// Note: We cannot use 'redacted_thinking' because it requires valid encrypted data.
+				// If history lacks thinking (due to previous errors/bugs), we must inject a Shim
+				// so the user can continue with Thinking enabled.
 				isClaude := strings.Contains(req.Model, "claude")
 				if isClaude && !hasThinking {
 					parts = append([]any{map[string]any{
-						"text":    "Placeholder: Original thinking content missing from history.",
+						"text":    "Placeholder: Thinking content was lost in previous turn (likely due to non-streaming/error).",
 						"thought": true,
 					}}, parts...)
 				}
