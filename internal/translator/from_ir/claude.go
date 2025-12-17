@@ -339,7 +339,9 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool, thinkingEnab
 	for i := range msg.Content {
 		switch msg.Content[i].Type {
 		case ir.ContentTypeReasoning:
-			hasThinking = true
+			if msg.Content[i].Reasoning != "" {
+				hasThinking = true
+			}
 		case ir.ContentTypeText, ir.ContentTypeImage:
 			hasTextOrImage = true
 		}
