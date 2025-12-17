@@ -151,7 +151,17 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 		reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
 
+		// Debug: Log raw response for Claude models (if needed for debugging)
+		// Note: Detailed tracing confirms that Antigravity backend generates thinking tokens (usage count is high)
+		// but currently does not return the thinking content in the response body for Claude models,
+		// even with includeThoughts=true. This is a server-side limitation.
+		// if strings.Contains(req.Model, "claude") {
+		// log.Infof("antigravity executor [CLAUDE]: raw response body: %s", string(bodyBytes))
+		// }
+
 		// Translate response using canonical translator
+		// Note: For Claude Thinking models on Antigravity, thinking content is ONLY returned
+		// in Streaming mode (SSE). Non-stream responses currently strip thinking content.
 		translatedResp, errTranslateResp := TranslateGeminiCLIResponseNonStream(e.cfg, from, bodyBytes, req.Model)
 		if errTranslateResp != nil {
 			return resp, fmt.Errorf("failed to translate response: %w", errTranslateResp)
@@ -711,6 +721,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payload = []byte(strJSON)
 	}
 
+	// Debug: Log request payload for Claude models
+	// if strings.Contains(modelName, "claude") {
+	// 	log.Infof("antigravity executor [CLAUDE REQUEST]: payload (first 2000 chars): %s", truncateString(string(payload), 2000))
+	// }
+
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return nil, errReq
@@ -870,7 +885,44 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
-	if !strings.HasPrefix(modelName, "gemini-3-") {
+	// Handle thinkingConfig and maxOutputTokens for different model types
+	if strings.Contains(modelName, "claude") && strings.Contains(modelName, "thinking") {
+		// Claude thinking models:
+		// 1. Ensure maxOutputTokens is set and large enough (> budget)
+		// 2. Inject thinkingConfig with multiple parameter formats to ensure compatibility
+
+		// Handle thinkingConfig patching (ensure snake_case and budget)
+		// We must patch even if thinkingConfig exists, because the upstream translator
+		// likely generates CamelCase 'includeThoughts' which the server ignores/drops.
+
+		const defaultThinkingBudget = 16000
+		const safeMaxTokens = 32000
+
+		// 1. Get/Set Thinking Budget
+		budgetPath := "request.generationConfig.thinkingConfig.thinkingBudget"
+		currentBudget := gjson.Get(template, budgetPath).Int()
+		if currentBudget <= 0 {
+			// If missing or 0, inject default
+			template, _ = sjson.Set(template, budgetPath, defaultThinkingBudget)
+			currentBudget = defaultThinkingBudget
+		}
+
+		// 2. Force snake_case 'include_thoughts' (Critical Fix)
+		// Server requires this specific format for Claude models.
+		template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.include_thoughts", true)
+
+		// 3. Validate Max Output Tokens
+		// Use maxminmaxdefault strategy: Ensure tokens are at least safeMaxTokens,
+		// or double the budget, or keep current if it's even higher.
+		maxTokensPath := "request.generationConfig.maxOutputTokens"
+		currentMaxTokens := gjson.Get(template, maxTokensPath).Int()
+
+		newMax := max(currentMaxTokens, currentBudget*2, int64(safeMaxTokens))
+		if newMax != currentMaxTokens {
+			template, _ = sjson.Set(template, maxTokensPath, newMax)
+		}
+	} else if !strings.HasPrefix(modelName, "gemini-3-") {
+		// Non-Gemini-3 models: Convert thinkingLevel to thinkingBudget
 		if thinkingLevel := gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingLevel"); thinkingLevel.Exists() {
 			template, _ = sjson.Delete(template, "request.generationConfig.thinkingConfig.thinkingLevel")
 			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
