@@ -112,16 +112,25 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 
 	budget, include, auto := util.GetAutoAppliedThinkingConfig(req.Model)
 	if isClaude {
-		auto = true // Always auto-apply for Claude if missing
-		include = true
-		if budget <= 0 {
-			budget = defaultThinkingBudget
+		// Only AUTO-apply thinking for Claude if NO tools in request
+		// With tools, client must explicitly request thinking via req.Thinking
+		if len(req.Tools) == 0 {
+			auto = true // Auto-apply for Claude without tools
+			include = true
+			if budget <= 0 {
+				budget = defaultThinkingBudget
+			}
+		} else {
+			// With tools: don't auto-apply, but explicit req.Thinking will still work
+			auto = false
 		}
 	}
 
 	// Logic for Gemini 3 vs Others
 	if isGemini3 {
-		// Gemini 3 Pro uses thinking_level if explicit thinking is requested/auto-applied
+		// Gemini 3 Pro uses thinking_level for thinking control
+		// Always enable thinking with includeThoughts=true to get thinking text in response
+		// This is required for SDK to preserve thinking blocks in multi-turn flows
 		if req.Thinking != nil || auto {
 			tc := map[string]any{
 				"includeThoughts": true,
@@ -135,24 +144,38 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 			switch effort {
 			case ir.ReasoningEffortLow:
 				tc["thinking_level"] = "LOW"
+			case ir.ReasoningEffortMedium:
+				tc["thinking_level"] = "MEDIUM"
 			case ir.ReasoningEffortHigh:
 				tc["thinking_level"] = "HIGH"
+			default:
+				tc["thinking_level"] = "MEDIUM" // Default to MEDIUM for Gemini 3
 			}
-			// Note: Gemini 3 currently uses 'thinking_level' (LOW/HIGH) instead of budget
-			// Check if we also need budget? The SDK says Budget is for 2.5/Claude.
+			// Note: Gemini 3 uses 'thinking_level' (LOW/MEDIUM/HIGH) instead of budget
 			genConfig["thinkingConfig"] = tc
 		}
 	} else {
-		// Auto-apply logic for Claude/Gemini 2.5
-		if genConfig["thinkingConfig"] == nil && auto {
-			includeKey := "includeThoughts"
-			if isClaude {
-				includeKey = "include_thoughts"
+		// Logic for Claude/Gemini 2.5 (non-Gemini3)
+		// Apply explicit req.Thinking OR auto-apply
+		if req.Thinking != nil || auto {
+			// Send BOTH camelCase and snake_case to ensure upstream compatibility
+
+			effectiveBudget := budget
+			if req.Thinking != nil && req.Thinking.ThinkingBudget != nil {
+				effectiveBudget = int(*req.Thinking.ThinkingBudget)
 			}
-			genConfig["thinkingConfig"] = map[string]any{
-				"thinkingBudget": budget,
-				includeKey:       include,
+
+			effectiveInclude := include
+			if req.Thinking != nil {
+				effectiveInclude = req.Thinking.IncludeThoughts
 			}
+
+			// Both Claude and Gemini use CamelCase: thinkingBudget, includeThoughts
+			tc := map[string]any{
+				"thinkingBudget":  effectiveBudget,
+				"includeThoughts": effectiveInclude,
+			}
+			genConfig["thinkingConfig"] = tc
 		}
 	}
 
@@ -301,7 +324,12 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 
 			parts := make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
 
-			// 1. Process Content (Thinking/Text)
+			// Claude Thinking Protocol: Placeholder injection removed - signatures are cryptographically validated.
+			// SDK must send thinking blocks from previous turns back exactly as received.
+			// See: https://docs.anthropic.com/claude/docs/extended-thinking
+
+			// 1. Process Content (Thinking/Text) and collect signature for propagation
+			var lastThoughtSignature []byte // Signature from thinking block to propagate to tool calls
 			for _, contentPart := range msg.Content {
 				switch contentPart.Type {
 				case ir.ContentTypeReasoning:
@@ -311,6 +339,11 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 					}
 					if isValidThoughtSignature(contentPart.ThoughtSignature) {
 						p["thoughtSignature"] = string(contentPart.ThoughtSignature)
+						// Store for propagation to tool calls (Gemini API requires this)
+						lastThoughtSignature = contentPart.ThoughtSignature
+						if debugToolCalls {
+							log.Debugf("gemini: captured thinking signature (len=%d) for propagation", len(lastThoughtSignature))
+						}
 					}
 					parts = append(parts, p)
 				case ir.ContentTypeText:
@@ -344,8 +377,14 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 					part := map[string]any{
 						"functionCall": fcMap,
 					}
+					// Use tool call's own signature, or propagate from thinking block
+					// Gemini API requires thoughtSignature on functionCall when thinking is enabled
 					if len(tc.ThoughtSignature) > 0 {
 						part["thoughtSignature"] = string(tc.ThoughtSignature)
+					} else if len(lastThoughtSignature) > 0 {
+						// Propagate signature from thinking block to tool call
+						// This is required for multi-turn flows where SDK doesn't preserve signature on tool_use
+						part["thoughtSignature"] = string(lastThoughtSignature)
 					}
 					parts = append(parts, part)
 					toolCallIDs = append(toolCallIDs, toolID)
@@ -442,7 +481,9 @@ func (p *GeminiProvider) applyTools(root map[string]any, req *ir.UnifiedChatRequ
 				// (including Antigravity/Vertex Claude models).
 				params := ir.CleanJsonSchema(copyMap(t.Parameters))
 				// Gemini requires parameters to have type "object"
-				if params["type"] == nil {
+				// Handle nil, empty string, or invalid type values (e.g., "None" from some SDKs)
+				typeVal, hasType := params["type"].(string)
+				if !hasType || typeVal == "" || typeVal == "None" {
 					params["type"] = "object"
 				}
 				if params["properties"] == nil {
@@ -657,14 +698,19 @@ func ToGeminiChunk(event ir.UnifiedEvent, model string) ([]byte, error) {
 					argsObj = map[string]any{}
 				}
 			}
-			candidate["content"].(map[string]any)["parts"] = []any{
-				map[string]any{
-					"functionCall": map[string]any{
-						"name": event.ToolCall.Name,
-						"args": argsObj,
-					},
+			part := map[string]any{
+				"functionCall": map[string]any{
+					"name": event.ToolCall.Name,
+					"args": argsObj,
 				},
 			}
+			// Include thoughtSignature on functionCall part (required by Gemini API for multi-turn)
+			if len(event.ThoughtSignature) > 0 {
+				part["thoughtSignature"] = string(event.ThoughtSignature)
+			} else if len(event.ToolCall.ThoughtSignature) > 0 {
+				part["thoughtSignature"] = string(event.ToolCall.ThoughtSignature)
+			}
+			candidate["content"].(map[string]any)["parts"] = []any{part}
 		}
 
 	case ir.EventTypeImage:

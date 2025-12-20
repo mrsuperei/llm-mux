@@ -2,7 +2,6 @@ package from_ir
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -105,16 +104,16 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 	// Check if thinking is enabled for this request
 	thinkingEnabled := false
 	if req.Thinking != nil {
-		fmt.Printf("DEBUG: req.Thinking present. IncludeThoughts=%v, Budget=%v\n", req.Thinking.IncludeThoughts, req.Thinking.ThinkingBudget)
 		// Relaxed check: if Thinking struct exists, we likely need to comply
 		thinkingEnabled = true
-	} else {
-		fmt.Printf("DEBUG: req.Thinking is nil\n")
+	}
+	// Force enable for known thinking models to ensure protocol compliance in history
+	if strings.Contains(req.Model, "thinking") {
+		thinkingEnabled = true
 	}
 
 	var messages []any
-	for i, msg := range req.Messages {
-		fmt.Printf("DEBUG: Processing message %d role=%s content_len=%d tools_len=%d\n", i, msg.Role, len(msg.Content), len(msg.ToolCalls))
+	for _, msg := range req.Messages {
 		switch msg.Role {
 		case ir.RoleSystem:
 			if text := ir.CombineTextParts(msg); text != "" {
@@ -135,7 +134,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 			}
 		case ir.RoleAssistant:
 			// Pass thinkingEnabled to inject placeholder if needed
-			if parts := buildClaudeContentParts(msg, true, thinkingEnabled); len(parts) > 0 {
+			if parts := buildClaudeContentParts(msg, isAssistantWithToolUse(msg), thinkingEnabled); len(parts) > 0 {
 				msgObj := map[string]any{"role": ir.ClaudeRoleAssistant, "content": parts}
 				// Add cache_control if present
 				if msg.CacheControl != nil {
@@ -223,6 +222,7 @@ func (p *ClaudeProvider) ParseStreamChunkWithState(chunkJSON []byte, state *ir.C
 	if len(data) == 0 {
 		return nil, nil
 	}
+	// fmt.Printf("DEBUG: SSE Chunk: %s\n", string(data))
 	if ir.ValidateJSON(data) != nil {
 		return nil, nil // Ignore invalid chunks in streaming
 	}
@@ -277,7 +277,7 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	case ir.EventTypeToken:
 		emitTextDeltaTo(result, event.Content, state)
 	case ir.EventTypeReasoning:
-		emitThinkingDeltaTo(result, event.Reasoning, state)
+		emitThinkingDeltaTo(result, event.Reasoning, event.ThoughtSignature, state)
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
 			emitToolCallTo(result, event.ToolCall, state)
@@ -345,21 +345,6 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool, thinkingEnab
 		case ir.ContentTypeText, ir.ContentTypeImage:
 			hasTextOrImage = true
 		}
-	}
-
-	// Claude Protocol: If Thinking is enabled and we have tool calls but no thinking,
-	// we MUST inject a thinking block at the START of the message.
-	// This satisfies: "assistant message must start with a thinking block (preceeding tool_use)"
-	// We use "redacted_thinking" which is safer for history where we don't have the real thought.
-	if thinkingEnabled && includeToolCalls && len(msg.ToolCalls) > 0 && !hasThinking {
-		parts = append(parts, map[string]any{
-			"type": "redacted_thinking",
-			"data": base64.StdEncoding.EncodeToString([]byte("redacted_by_proxy_for_protocol_compliance")),
-		})
-	} else if includeToolCalls && len(msg.ToolCalls) > 0 && !hasThinking {
-		// Even if thinking is NOT enabled for *this* request, if the model has previously used thinking,
-		// it might be safer to include a placeholder if we are in "thinking mode".
-		// But for now, only strictly enforce if thinkingEnabled=true for the current request.
 	}
 
 	for i := range msg.Content {
@@ -474,13 +459,14 @@ func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamSt
 		}
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
-		"type": ir.EventTypeToken, "index": idx,
+		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 		"delta": map[string]any{"type": "text_delta", "text": text},
 	}))
 }
 
 // emitThinkingDeltaTo writes thinking delta SSE to builder.
-func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *ClaudeStreamState) {
+// If signature is non-empty, also emits signature_delta event.
+func emitThinkingDeltaTo(result *strings.Builder, thinking string, signature []byte, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
 		// Switch block if needed
@@ -502,14 +488,35 @@ func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *Claude
 			}))
 		}
 	}
-	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
-		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
-		"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
-	}))
+
+	// Emit thinking_delta if we have thinking content
+	if thinking != "" {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
+			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+			"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
+		}))
+	}
+
+	// Emit signature_delta if we have a signature (SDK expects this as separate event)
+	if len(signature) > 0 {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
+			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+			"delta": map[string]any{"type": "signature_delta", "signature": string(signature)},
+		}))
+	}
 }
 
 // emitToolCallTo writes tool call SSE to builder.
 func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStreamState) {
+	// If tool call has signature and we have a thinking block open, emit signature_delta first
+	// This handles Gemini where signature arrives with functionCall, not with thinking text
+	if state != nil && state.TextBlockStarted && state.CurrentBlockType == ir.ClaudeBlockThinking && len(tc.ThoughtSignature) > 0 {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
+			"type": ir.ClaudeSSEContentBlockDelta, "index": state.TextBlockIndex,
+			"delta": map[string]any{"type": "signature_delta", "signature": string(tc.ThoughtSignature)},
+		}))
+	}
+
 	// Close any open content block (text or thinking)
 	if state != nil && state.TextBlockStarted {
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
@@ -612,4 +619,9 @@ func copyMap(m map[string]any) map[string]any {
 		}
 	}
 	return result
+}
+
+// isAssistantWithToolUse checks if the assistant message contains tool calls.
+func isAssistantWithToolUse(msg ir.Message) bool {
+	return len(msg.ToolCalls) > 0
 }
