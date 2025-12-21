@@ -1,117 +1,551 @@
 <#
 .SYNOPSIS
     llm-mux Windows Installer
-    Installs llm-mux binary and sets up a background task.
+    Installs llm-mux binary and sets up a background service.
 
 .DESCRIPTION
-    1. Downloads the latest release from GitHub.
-    2. Installs to $env:LOCALAPPDATA\Programs\llm-mux.
-    3. Adds the install directory to the User PATH.
-    4. Initializes default configuration.
-    5. Creates a Scheduled Task to run llm-mux at logon.
+    1. Downloads the specified or latest release from GitHub.
+    2. Verifies checksum integrity.
+    3. Installs to $env:LOCALAPPDATA\Programs\llm-mux.
+    4. Adds the install directory to the User PATH.
+    5. Initializes default configuration.
+    6. Creates a Scheduled Task to run llm-mux at logon with auto-restart.
+
+.PARAMETER Version
+    Specific version to install (e.g., "v1.0.0"). Default: latest.
+
+.PARAMETER InstallPath
+    Custom installation directory. Default: $env:LOCALAPPDATA\Programs\llm-mux
+
+.PARAMETER NoService
+    Skip scheduled task setup (install binary only).
+
+.PARAMETER NoVerify
+    Skip checksum verification.
+
+.PARAMETER Force
+    Force reinstall even if same version exists.
 
 .EXAMPLE
+    # Default install (latest version)
     irm https://raw.githubusercontent.com/nghyane/llm-mux/main/install.ps1 | iex
+
+    # Install specific version
+    & { $Version = "v1.0.0"; irm .../install.ps1 | iex }
+
+    # Binary only, no service
+    & { $NoService = $true; irm .../install.ps1 | iex }
 #>
 
+param(
+    [string]$Version = "",
+    [string]$InstallPath = "",
+    [switch]$NoService = $false,
+    [switch]$NoVerify = $false,
+    [switch]$Force = $false
+)
+
+# --- Configuration ---
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"  # Faster downloads
+
 $Repo = "nghyane/llm-mux"
 $AppName = "llm-mux"
-$InstallDir = "$env:LOCALAPPDATA\Programs\$AppName"
-$BinPath = "$InstallDir\$AppName.exe"
+$TaskName = "llm-mux Background Service"
 
-# --- 1. Detect Architecture ---
-Write-Host "Checking system architecture..." -ForegroundColor Cyan
-if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
-    $Arch = "arm64"
-} elseif ($env:PROCESSOR_ARCHITECTURE -eq "AMD64") {
-    $Arch = "amd64"
-} else {
-    Write-Error "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE"
+# Set TLS 1.2 for older PowerShell versions
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --- Helper Functions ---
+
+function Write-Log {
+    param([string]$Message, [string]$Color = "White")
+    Write-Host "==> " -ForegroundColor Cyan -NoNewline
+    Write-Host $Message -ForegroundColor $Color
 }
 
-# --- 2. Get Latest Version ---
-Write-Host "Fetching latest release info from GitHub..." -ForegroundColor Cyan
-try {
-    $LatestRelease = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
-    $TagName = $LatestRelease.tag_name
-    $Version = $TagName.TrimStart('v')
-} catch {
-    Write-Error "Failed to fetch latest release. Check your internet connection."
+function Write-Info {
+    param([string]$Message)
+    Write-Host "    $Message" -ForegroundColor Gray
 }
 
-Write-Host "Latest version: $TagName" -ForegroundColor Green
-
-# --- 3. Download and Install ---
-$ZipName = "llm-mux_${Version}_windows_${Arch}.zip"
-$DownloadUrl = "https://github.com/$Repo/releases/download/$TagName/$ZipName"
-$TempZip = "$env:TEMP\$ZipName"
-
-Write-Host "Downloading $DownloadUrl..." -ForegroundColor Cyan
-Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip
-
-if (!(Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+function Write-Warn {
+    param([string]$Message)
+    Write-Host "warning: " -ForegroundColor Yellow -NoNewline
+    Write-Host $Message
 }
 
-Write-Host "Extracting to $InstallDir..." -ForegroundColor Cyan
-Expand-Archive -Path $TempZip -DestinationPath $InstallDir -Force
-Remove-Item $TempZip -Force
-
-# Verify binary existence (sometimes it's nested or flattened)
-$ExeFound = Get-ChildItem -Path $InstallDir -Filter "$AppName.exe" -Recurse | Select-Object -First 1
-if (!$ExeFound) {
-    Write-Error "Could not find $AppName.exe in the downloaded archive."
+function Write-Err {
+    param([string]$Message)
+    Write-Host "error: " -ForegroundColor Red -NoNewline
+    Write-Host $Message
+    exit 1
 }
 
-# Move to root of install dir if nested
-if ($ExeFound.DirectoryName -ne $InstallDir) {
-    Move-Item $ExeFound.FullName $InstallDir -Force
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# --- 4. Update PATH ---
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$InstallDir*") {
-    Write-Host "Adding $InstallDir to User PATH..." -ForegroundColor Yellow
-    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
-    $env:Path += ";$InstallDir"
-} else {
-    Write-Host "PATH already configured." -ForegroundColor Green
+# --- Architecture Detection ---
+
+function Get-Architecture {
+    Write-Log "Detecting system architecture..."
+
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    switch ($arch) {
+        "AMD64" { return "amd64" }
+        "ARM64" { return "arm64" }
+        "x86"   { return "386" }
+        default { Write-Err "Unsupported architecture: $arch. Supported: AMD64, ARM64, x86" }
+    }
 }
 
-# --- 5. Init Config ---
-Write-Host "Initializing configuration..." -ForegroundColor Cyan
-& $BinPath --init | Out-Null
+# --- Version Management ---
 
-# --- 6. Setup Persistence (Scheduled Task) ---
-$TaskName = "Start llm-mux"
-Write-Host "Setting up background task ($TaskName)..." -ForegroundColor Cyan
+function Get-LatestVersion {
+    if ($script:Version) {
+        Write-Info "Using specified version: $script:Version"
+        return $script:Version
+    }
 
-# Remove existing task if present to ensure update
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Write-Log "Fetching latest release info..."
+
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec 30
+        $tagName = $release.tag_name
+
+        if (-not $tagName) {
+            Write-Err "Failed to parse version from GitHub API response."
+        }
+
+        Write-Info "Latest version: $tagName"
+        return $tagName
+    }
+    catch {
+        Write-Err "Failed to fetch latest release: $($_.Exception.Message)`nCheck your internet connection or specify -Version parameter."
+    }
 }
 
-$Action = New-ScheduledTaskAction -Execute $BinPath
-$Trigger = New-ScheduledTaskTrigger -AtLogon
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+# --- Checksum Verification ---
 
-# Register the task
-Register-ScheduledTask -Action $Action -Trigger $Trigger -Settings $Settings -TaskName $TaskName -Description "Runs llm-mux proxy server in the background" | Out-Null
+function Get-FileHash256 {
+    param([string]$FilePath)
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host " $AppName $TagName installed successfully!" -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. Login to a provider:"
-Write-Host "     llm-mux --login              # Gemini"
-Write-Host "     llm-mux --claude-login       # Claude"
-Write-Host ""
-Write-Host "  2. The background service has been registered to start on login."
-Write-Host "     To start it immediately, run:"
-Write-Host "     Start-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "  3. Restart your terminal to refresh the PATH."
-Write-Host ""
+    $hash = Get-FileHash -Path $FilePath -Algorithm SHA256
+    return $hash.Hash.ToLower()
+}
+
+function Test-Checksum {
+    param(
+        [string]$FilePath,
+        [string]$ChecksumsPath,
+        [string]$FileName
+    )
+
+    if ($script:NoVerify) {
+        Write-Warn "Checksum verification skipped (-NoVerify)"
+        return $true
+    }
+
+    if (-not (Test-Path $ChecksumsPath)) {
+        Write-Warn "Checksums file not available. Skipping verification."
+        return $true
+    }
+
+    $checksumContent = Get-Content $ChecksumsPath -Raw
+    $pattern = "([a-fA-F0-9]{64})\s+\*?$([regex]::Escape($FileName))"
+
+    if ($checksumContent -match $pattern) {
+        $expected = $matches[1].ToLower()
+        $actual = Get-FileHash256 -FilePath $FilePath
+
+        if ($expected -ne $actual) {
+            Write-Host ""
+            Write-Err "Checksum verification FAILED!`n  Expected: $expected`n  Actual:   $actual`n`nThe downloaded file may be corrupted or tampered with."
+        }
+
+        Write-Info "Checksum verified"
+        return $true
+    }
+    else {
+        Write-Warn "No checksum found for $FileName in checksums file."
+        return $true
+    }
+}
+
+# --- Download & Install ---
+
+function Install-Binary {
+    param(
+        [string]$TagName,
+        [string]$Arch,
+        [string]$TargetDir
+    )
+
+    $versionNum = $TagName.TrimStart('v')
+    $zipName = "llm-mux_${versionNum}_windows_${Arch}.zip"
+    $downloadUrl = "https://github.com/$Repo/releases/download/$TagName/$zipName"
+    $checksumsUrl = "https://github.com/$Repo/releases/download/$TagName/checksums.txt"
+
+    $tempDir = Join-Path $env:TEMP "llm-mux-install-$(Get-Random)"
+    $tempZip = Join-Path $tempDir $zipName
+    $tempChecksums = Join-Path $tempDir "checksums.txt"
+
+    try {
+        # Create temp directory
+        New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+
+        # Download archive
+        Write-Log "Downloading $zipName..."
+        Write-Info "URL: $downloadUrl"
+
+        try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -TimeoutSec 120
+        }
+        catch {
+            Write-Err "Failed to download: $($_.Exception.Message)`nThe version or platform may not be available."
+        }
+
+        # Download checksums (optional)
+        Write-Log "Downloading checksums..."
+        try {
+            Invoke-WebRequest -Uri $checksumsUrl -OutFile $tempChecksums -TimeoutSec 30
+        }
+        catch {
+            Write-Warn "Checksums file not available for this release."
+        }
+
+        # Verify checksum
+        Test-Checksum -FilePath $tempZip -ChecksumsPath $tempChecksums -FileName $zipName
+
+        # Create install directory
+        if (-not (Test-Path $TargetDir)) {
+            Write-Log "Creating install directory..."
+            New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+        }
+
+        # Backup existing binary
+        $existingBinary = Join-Path $TargetDir "$AppName.exe"
+        if (Test-Path $existingBinary) {
+            Write-Info "Backing up existing binary..."
+            $backupPath = "$existingBinary.bak"
+            Move-Item -Path $existingBinary -Destination $backupPath -Force -ErrorAction SilentlyContinue
+        }
+
+        # Extract archive
+        Write-Log "Extracting to $TargetDir..."
+        $extractDir = Join-Path $tempDir "extracted"
+        Expand-Archive -Path $tempZip -DestinationPath $extractDir -Force
+
+        # Find the binary (handle nested directories)
+        $exeFile = Get-ChildItem -Path $extractDir -Filter "$AppName.exe" -Recurse | Select-Object -First 1
+
+        if (-not $exeFile) {
+            Write-Err "Could not find $AppName.exe in the downloaded archive."
+        }
+
+        # Move binary to install directory
+        Move-Item -Path $exeFile.FullName -Destination $TargetDir -Force
+
+        # Also copy any additional files (README, LICENSE, etc.)
+        $additionalFiles = Get-ChildItem -Path $extractDir -File -Recurse | Where-Object { $_.Name -ne "$AppName.exe" }
+        foreach ($file in $additionalFiles) {
+            Copy-Item -Path $file.FullName -Destination $TargetDir -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Info "Binary installed: $(Join-Path $TargetDir "$AppName.exe")"
+    }
+    finally {
+        # Cleanup temp directory
+        if (Test-Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# --- PATH Management ---
+
+function Add-ToPath {
+    param([string]$Directory)
+
+    Write-Log "Checking PATH..."
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+
+    # Check if already in PATH
+    $pathEntries = $userPath -split ';' | Where-Object { $_ -ne '' }
+    if ($pathEntries -contains $Directory) {
+        Write-Info "PATH already configured."
+        return
+    }
+
+    # Add to PATH
+    Write-Info "Adding $Directory to User PATH..."
+
+    # Clean up PATH (remove empty entries, duplicates)
+    $cleanPath = ($pathEntries | Select-Object -Unique) -join ';'
+    $newPath = "$cleanPath;$Directory"
+
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+
+    # Update current session
+    $env:Path = "$env:Path;$Directory"
+
+    Write-Info "PATH updated. Restart your terminal to apply."
+}
+
+# --- Configuration ---
+
+function Initialize-Config {
+    param([string]$BinaryPath)
+
+    $configDir = Join-Path $env:USERPROFILE ".config\llm-mux"
+    $configFile = Join-Path $configDir "config.yaml"
+
+    if (Test-Path $configFile) {
+        Write-Info "Config exists: $configFile"
+        return
+    }
+
+    Write-Log "Initializing configuration..."
+
+    try {
+        $process = Start-Process -FilePath $BinaryPath -ArgumentList "--init" -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            Write-Info "Config created: $configFile"
+        }
+        else {
+            Write-Warn "Config initialization returned non-zero exit code."
+        }
+    }
+    catch {
+        Write-Warn "Failed to initialize config: $($_.Exception.Message)"
+        Write-Warn "You can create it manually later by running: $AppName --init"
+    }
+}
+
+# --- Service Management (Scheduled Task) ---
+
+function Install-ScheduledTask {
+    param([string]$BinaryPath)
+
+    Write-Log "Setting up scheduled task..."
+
+    # Remove existing task if present
+    $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($existingTask) {
+        Write-Info "Removing existing task..."
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    }
+
+    # Create action
+    $action = New-ScheduledTaskAction -Execute $BinaryPath -WorkingDirectory $env:USERPROFILE
+
+    # Create triggers: at logon + on task registration (start immediately)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogon
+
+    # Create settings with restart on failure
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -StartWhenAvailable `
+        -RunOnlyIfNetworkAvailable
+
+    # Register the task
+    try {
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Trigger $triggerLogon `
+            -Settings $settings `
+            -Description "Runs llm-mux proxy server in the background. Restarts automatically on failure." `
+            | Out-Null
+
+        Write-Info "Scheduled task created: $TaskName"
+
+        # Start the task immediately
+        Write-Info "Starting service..."
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+
+        return $true
+    }
+    catch {
+        Write-Warn "Failed to create scheduled task: $($_.Exception.Message)"
+        Write-Warn "You can run llm-mux manually: $BinaryPath"
+        return $false
+    }
+}
+
+function Get-ServiceStatus {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        return "not installed"
+    }
+
+    $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($taskInfo.LastTaskResult -eq 267009) {
+        # Task is running
+        return "running"
+    }
+
+    # Check if process is actually running
+    $process = Get-Process -Name $AppName -ErrorAction SilentlyContinue
+    if ($process) {
+        return "running"
+    }
+
+    return "stopped"
+}
+
+# --- Version Check ---
+
+function Test-ExistingInstall {
+    param(
+        [string]$BinaryPath,
+        [string]$TargetVersion
+    )
+
+    if (-not (Test-Path $BinaryPath)) {
+        return $true  # No existing install, proceed
+    }
+
+    if ($script:Force) {
+        Write-Info "Force reinstall requested."
+        return $true
+    }
+
+    try {
+        $existingVersion = & $BinaryPath --version 2>&1 | Select-Object -First 1
+
+        if ($existingVersion -match $TargetVersion.TrimStart('v')) {
+            Write-Info "$AppName $TargetVersion is already installed."
+            Write-Info "Use -Force to reinstall."
+            return $false
+        }
+    }
+    catch {
+        # Can't determine version, proceed with install
+    }
+
+    return $true
+}
+
+# --- Main ---
+
+function Show-Success {
+    param(
+        [string]$TagName,
+        [string]$InstallDir,
+        [bool]$ServiceInstalled
+    )
+
+    $status = if ($ServiceInstalled) { Get-ServiceStatus } else { "not installed" }
+
+    Write-Host ""
+    Write-Host "========================================================" -ForegroundColor Green
+    Write-Host " $AppName $TagName installed successfully!" -ForegroundColor Green
+    Write-Host "========================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Binary:  $InstallDir\$AppName.exe"
+    Write-Host "  Config:  $env:USERPROFILE\.config\llm-mux\config.yaml"
+    if (-not $script:NoService) {
+        Write-Host "  Service: $status"
+    }
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  1. Login to a provider:"
+    Write-Host "     $AppName --login              # Gemini"
+    Write-Host "     $AppName --claude-login       # Claude"
+    Write-Host "     $AppName --copilot-login      # GitHub Copilot"
+    Write-Host "     $AppName --codex-login        # OpenAI Codex"
+    Write-Host ""
+
+    if ($script:NoService) {
+        Write-Host "  2. Start the server:"
+        Write-Host "     $AppName"
+    }
+    else {
+        Write-Host "  2. Service commands:"
+        Write-Host "     Start-ScheduledTask -TaskName '$TaskName'   # Start"
+        Write-Host "     Stop-ScheduledTask -TaskName '$TaskName'    # Stop"
+        Write-Host "     Get-ScheduledTaskInfo -TaskName '$TaskName' # Status"
+    }
+
+    Write-Host ""
+    Write-Host "  3. Test the API:"
+    Write-Host "     curl http://localhost:8318/v1/models"
+    Write-Host "     # or with PowerShell:"
+    Write-Host "     Invoke-RestMethod http://localhost:8318/v1/models"
+    Write-Host ""
+
+    if ($status -eq "running") {
+        Write-Host "  The service is now running!" -ForegroundColor Green
+    }
+    elseif (-not $script:NoService) {
+        Write-Host "  Note: Restart your terminal, then start the service with:" -ForegroundColor Yellow
+        Write-Host "     Start-ScheduledTask -TaskName '$TaskName'"
+    }
+
+    Write-Host ""
+}
+
+function Main {
+    Write-Host ""
+    Write-Log "llm-mux Windows Installer"
+    Write-Host ""
+
+    # Check if running as admin (warn but don't block)
+    if (Test-Administrator) {
+        Write-Warn "Running as Administrator. The service will be installed for the current user only."
+    }
+
+    # Detect architecture
+    $arch = Get-Architecture
+    Write-Info "Architecture: $arch"
+
+    # Determine install directory
+    if (-not $script:InstallPath) {
+        $installDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
+    }
+    else {
+        $installDir = $script:InstallPath
+    }
+    Write-Info "Install directory: $installDir"
+
+    # Get version
+    $tagName = Get-LatestVersion
+
+    # Check existing installation
+    $binaryPath = Join-Path $installDir "$AppName.exe"
+    if (-not (Test-ExistingInstall -BinaryPath $binaryPath -TargetVersion $tagName)) {
+        Write-Host ""
+        exit 0
+    }
+
+    # Install binary
+    Install-Binary -TagName $tagName -Arch $arch -TargetDir $installDir
+
+    # Update PATH
+    Add-ToPath -Directory $installDir
+
+    # Initialize config
+    Initialize-Config -BinaryPath $binaryPath
+
+    # Setup service
+    $serviceInstalled = $false
+    if (-not $script:NoService) {
+        $serviceInstalled = Install-ScheduledTask -BinaryPath $binaryPath
+    }
+
+    # Show success message
+    Show-Success -TagName $tagName -InstallDir $installDir -ServiceInstalled $serviceInstalled
+}
+
+# Run main
+Main

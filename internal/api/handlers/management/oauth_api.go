@@ -206,7 +206,7 @@ func (h *Handler) waitForCallbackFile(ctx context.Context, provider, state strin
 			_ = os.Remove(callbackFile)
 
 			if callback.Error != "" {
-				return nil, fmt.Errorf(callback.Error)
+				return nil, fmt.Errorf("oauth error: %s", callback.Error)
 			}
 			if callback.Code == "" {
 				continue

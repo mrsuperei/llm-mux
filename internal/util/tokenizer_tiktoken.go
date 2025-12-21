@@ -36,11 +36,6 @@ func CountTiktokenTokens(model string, req *ir.UnifiedChatRequest) int64 {
 
 	var totalTokens int64 = 0
 
-	// 1. System Prompt (if any - usually prepended to messages or separate)
-	// We handle it as part of messages loop in IR usually, but if IR has distinct field:
-	// (Assuming IR puts system prompt in Messages with RoleSystem)
-
-	// 2. Messages
 	// Overhead per message (improvising OpenAI's format: <|start|>{role/name}\n{content}<|end|>\n)
 	// Usually 3 or 4 tokens per message depending on the model.
 	tokensPerMessage := int64(3)
@@ -48,6 +43,13 @@ func CountTiktokenTokens(model string, req *ir.UnifiedChatRequest) int64 {
 		tokensPerMessage = 3 // GPT-4o style
 	}
 
+	// 1. Instructions (Responses API system instructions)
+	if req.Instructions != "" {
+		ids, _, _ := enc.Encode(req.Instructions)
+		totalTokens += int64(len(ids)) + tokensPerMessage
+	}
+
+	// 2. Messages
 	for _, msg := range req.Messages {
 		totalTokens += tokensPerMessage
 
@@ -131,6 +133,7 @@ func getTiktokenEncodingName(model string) tokenizer.Encoding {
 }
 
 // irMessageToString converts an IR message to a text representation for token counting.
+// Returns the text content and image count. All nil checks are performed to prevent panics.
 func irMessageToString(msg *ir.Message) (string, int) {
 	var sb strings.Builder
 	imageCount := 0
@@ -138,18 +141,34 @@ func irMessageToString(msg *ir.Message) (string, int) {
 	for _, part := range msg.Content {
 		switch part.Type {
 		case ir.ContentTypeText:
-			sb.WriteString(part.Text)
+			if part.Text != "" {
+				sb.WriteString(part.Text)
+			}
 		case ir.ContentTypeReasoning:
-			sb.WriteString(part.Reasoning)
+			if part.Reasoning != "" {
+				sb.WriteString(part.Reasoning)
+			}
 		case ir.ContentTypeCodeResult:
-			sb.WriteString(part.CodeExecution.Output)
+			if part.CodeExecution != nil && part.CodeExecution.Output != "" {
+				sb.WriteString(part.CodeExecution.Output)
+			}
 		case ir.ContentTypeExecutableCode:
-			sb.WriteString(part.CodeExecution.Code)
+			if part.CodeExecution != nil && part.CodeExecution.Code != "" {
+				sb.WriteString(part.CodeExecution.Code)
+			}
 		case ir.ContentTypeImage:
-			imageCount++
+			if part.Image != nil {
+				imageCount++
+			}
+		case ir.ContentTypeFile:
+			if part.File != nil && part.File.FileData != "" {
+				sb.WriteString(part.File.FileData)
+			}
 		case ir.ContentTypeToolResult:
-			// Approximate format
-			sb.WriteString(fmt.Sprintf("\nTool %s result: %s", part.ToolResult.ToolCallID, part.ToolResult.Result))
+			if part.ToolResult != nil {
+				sb.WriteString(fmt.Sprintf("\nTool %s result: %s", part.ToolResult.ToolCallID, part.ToolResult.Result))
+				imageCount += len(part.ToolResult.Images)
+			}
 		}
 	}
 

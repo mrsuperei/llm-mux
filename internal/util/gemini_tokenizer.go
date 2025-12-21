@@ -74,6 +74,17 @@ func countGeminiTokens(model string, req *ir.UnifiedChatRequest) int64 {
 		}
 	}
 
+	// Count instructions tokens (Responses API system instructions)
+	if req.Instructions != "" {
+		instructionContent := &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{genai.NewPartFromText(req.Instructions)},
+		}
+		if result, err := tok.CountTokens([]*genai.Content{instructionContent}, nil); err == nil {
+			contentTokens += int64(result.TotalTokens)
+		}
+	}
+
 	// Count tool definition tokens
 	toolTokens := countToolTokensFromIR(tok, req.Tools)
 
