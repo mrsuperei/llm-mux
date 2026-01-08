@@ -2,7 +2,7 @@ package provider
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"math/rand"
+	"math/rand/v2"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -286,7 +286,7 @@ func (m *QuotaManager) selectWithStrategy(auths []*Auth, config *ProviderQuotaCo
 	}
 
 	if similarCount > 1 {
-		return candidates[rand.Intn(similarCount)].auth
+		return candidates[rand.N(similarCount)].auth
 	}
 
 	return candidates[0].auth
@@ -533,32 +533,48 @@ const (
 	quotaRecoveredThreshold = 0.05
 )
 
+// handleQuotaSnapshotUpdate uses CAS to update cooldown based on RealQuota.
+// Hysteresis: Exhausted ≤2% sets cooldown, Recovered ≥5% clears it, 2%-5% unchanged (prevents flapping).
 func (m *QuotaManager) handleQuotaSnapshotUpdate(state *AuthQuotaState, snapshot *RealQuotaSnapshot) {
 	if state == nil || snapshot == nil {
 		return
 	}
 
 	now := time.Now()
-	currentCooldown := state.GetCooldownUntil()
-	hasCooldown := !currentCooldown.IsZero() && currentCooldown.After(now)
 
 	if snapshot.RemainingFraction <= quotaExhaustedThreshold {
-		if !hasCooldown {
-			var cooldownUntil time.Time
-			if !snapshot.WindowResetAt.IsZero() && snapshot.WindowResetAt.After(now) {
-				cooldownUntil = snapshot.WindowResetAt
-			} else {
-				cooldownUntil = now.Add(5 * time.Hour)
+		var cooldownUntil time.Time
+		if !snapshot.WindowResetAt.IsZero() && snapshot.WindowResetAt.After(now) {
+			cooldownUntil = snapshot.WindowResetAt
+		} else {
+			cooldownUntil = now.Add(5 * time.Hour)
+		}
+		newCooldownNs := cooldownUntil.UnixNano()
+
+		for {
+			currentNs := state.CooldownUntil.Load()
+			if currentNs >= newCooldownNs {
+				break
 			}
-			state.SetCooldownUntil(cooldownUntil)
-			state.SetLastExhaustedAt(now)
+			if state.CooldownUntil.CompareAndSwap(currentNs, newCooldownNs) {
+				state.SetLastExhaustedAt(now)
+				break
+			}
 		}
 		return
 	}
 
-	if hasCooldown && snapshot.RemainingFraction >= quotaRecoveredThreshold {
-		state.SetCooldownUntil(time.Time{})
-		state.TotalTokensUsed.Store(0)
+	if snapshot.RemainingFraction >= quotaRecoveredThreshold {
+		for {
+			currentNs := state.CooldownUntil.Load()
+			if currentNs == 0 {
+				break
+			}
+			if state.CooldownUntil.CompareAndSwap(currentNs, 0) {
+				state.TotalTokensUsed.Store(0)
+				break
+			}
+		}
 	}
 }
 

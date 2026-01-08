@@ -20,20 +20,39 @@ func PrewarmAntigravityConnections(ctx context.Context) {
 		wg.Add(1)
 		go func(url string) {
 			defer wg.Done()
-			prewarmHTTP(ctx, url, timeout)
+			prewarmHTTPWithRetry(ctx, url, timeout, 2)
 		}(endpoint)
 	}
 
 	wg.Wait()
 }
 
-func prewarmHTTP(ctx context.Context, baseURL string, timeout time.Duration) {
+func prewarmHTTPWithRetry(ctx context.Context, baseURL string, timeout time.Duration, maxAttempts int) {
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+		}
+
+		if prewarmHTTP(ctx, baseURL, timeout) {
+			return
+		}
+	}
+}
+
+func prewarmHTTP(ctx context.Context, baseURL string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, baseURL, nil)
 	if err != nil {
-		return
+		return false
 	}
 
 	client := &http.Client{
@@ -43,7 +62,8 @@ func prewarmHTTP(ctx context.Context, baseURL string, timeout time.Duration) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return
+		return false
 	}
 	resp.Body.Close()
+	return true
 }
