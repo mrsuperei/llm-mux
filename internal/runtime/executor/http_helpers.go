@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"compress/flate"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/valyala/bytebufferpool"
 )
 
 type HeaderConfig struct {
@@ -192,19 +192,12 @@ func DecodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 const (
 	gzipCompressionThreshold = 1024
 	gzipCompressionLevel     = gzip.BestSpeed
-	gzipBufferInitSize       = 4096
 )
 
 var gzipWriterPool = sync.Pool{
 	New: func() any {
 		w, _ := gzip.NewWriterLevel(nil, gzipCompressionLevel)
 		return w
-	},
-}
-
-var gzipBufferPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, gzipBufferInitSize))
 	},
 }
 
@@ -219,35 +212,30 @@ func CompressRequestBody(body []byte) CompressedBody {
 	}
 
 	gw := gzipWriterPool.Get().(*gzip.Writer)
-	buf := gzipBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-
-	if buf.Cap() < len(body)/2 {
-		buf.Grow(len(body) / 2)
-	}
+	buf := bytebufferpool.Get()
 
 	gw.Reset(buf)
 	_, err := gw.Write(body)
 	if err != nil {
 		gzipWriterPool.Put(gw)
-		gzipBufferPool.Put(buf)
+		bytebufferpool.Put(buf)
 		return CompressedBody{Data: body, IsCompressed: false}
 	}
 	if err := gw.Close(); err != nil {
 		gzipWriterPool.Put(gw)
-		gzipBufferPool.Put(buf)
+		bytebufferpool.Put(buf)
 		return CompressedBody{Data: body, IsCompressed: false}
 	}
 	gzipWriterPool.Put(gw)
 
 	if buf.Len() >= len(body) {
-		gzipBufferPool.Put(buf)
+		bytebufferpool.Put(buf)
 		return CompressedBody{Data: body, IsCompressed: false}
 	}
 
 	result := make([]byte, buf.Len())
 	copy(result, buf.Bytes())
-	gzipBufferPool.Put(buf)
+	bytebufferpool.Put(buf)
 
 	return CompressedBody{Data: result, IsCompressed: true}
 }

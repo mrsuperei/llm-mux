@@ -2,7 +2,15 @@
 // This package exists to break circular imports between executor and resilience packages.
 package transport
 
-import "time"
+import (
+	"crypto/tls"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	"golang.org/x/net/http2"
+)
 
 // Config holds optimized HTTP transport settings for API gateway workloads.
 // These values are tuned for high-concurrency LLM API streaming.
@@ -43,4 +51,47 @@ var Config = struct {
 	H2PingTimeout:                15 * time.Second, // Wait for ping response
 	H2StrictMaxConcurrentStreams: false,            // Don't limit concurrent streams strictly
 	H2AllowHTTP:                  false,            // Require HTTPS for HTTP/2
+}
+
+var sharedTransport = sync.OnceValue(func() *http.Transport {
+	t := &http.Transport{
+		MaxIdleConns:        Config.MaxIdleConns,
+		MaxIdleConnsPerHost: Config.MaxIdleConnsPerHost,
+		MaxConnsPerHost:     Config.MaxConnsPerHost,
+		IdleConnTimeout:     Config.IdleConnTimeout,
+
+		TLSHandshakeTimeout:   Config.TLSHandshakeTimeout,
+		ExpectContinueTimeout: Config.ExpectContinueTimeout,
+		ResponseHeaderTimeout: Config.ResponseHeaderTimeout,
+
+		ForceAttemptHTTP2:  true,
+		DisableCompression: false,
+
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+
+		WriteBufferSize: 64 * 1024,
+		ReadBufferSize:  64 * 1024,
+
+		DialContext: (&net.Dialer{
+			Timeout:   Config.DialTimeout,
+			KeepAlive: Config.KeepAlive,
+			DualStack: true,
+		}).DialContext,
+	}
+
+	if h2, err := http2.ConfigureTransports(t); err == nil {
+		h2.ReadIdleTimeout = Config.H2ReadIdleTimeout
+		h2.PingTimeout = Config.H2PingTimeout
+		h2.StrictMaxConcurrentStreams = Config.H2StrictMaxConcurrentStreams
+		h2.AllowHTTP = Config.H2AllowHTTP
+	}
+
+	return t
+})
+
+var SharedClient = &http.Client{
+	Transport: sharedTransport(),
+	Timeout:   30 * time.Second,
 }

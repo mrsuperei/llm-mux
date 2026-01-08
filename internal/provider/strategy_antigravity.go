@@ -68,7 +68,18 @@ func (s *AntigravityStrategy) OnQuotaHit(state *AuthQuotaState, cooldown *time.D
 			cooldownUntil = now.Add(5 * time.Hour)
 		}
 	}
-	state.SetCooldownUntil(cooldownUntil)
+
+	newCooldownNs := cooldownUntil.UnixNano()
+	for {
+		currentNs := state.CooldownUntil.Load()
+		if currentNs >= newCooldownNs {
+			break
+		}
+		if state.CooldownUntil.CompareAndSwap(currentNs, newCooldownNs) {
+			break
+		}
+	}
+
 	state.TotalTokensUsed.Store(0)
 }
 
@@ -213,8 +224,22 @@ func checkTokenFromAuth(auth *Auth, buffer time.Duration) (valid bool, needsRefr
 	}
 
 	if expiresAt.IsZero() {
-		if ts, ok := auth.Metadata["timestamp"].(int64); ok {
-			if expiresIn, ok := auth.Metadata["expires_in"].(int64); ok && expiresIn > 0 {
+		var ts int64
+		switch v := auth.Metadata["timestamp"].(type) {
+		case int64:
+			ts = v
+		case float64:
+			ts = int64(v)
+		}
+		if ts > 0 {
+			var expiresIn int64
+			switch v := auth.Metadata["expires_in"].(type) {
+			case int64:
+				expiresIn = v
+			case float64:
+				expiresIn = int64(v)
+			}
+			if expiresIn > 0 {
 				expiresAt = time.UnixMilli(ts).Add(time.Duration(expiresIn) * time.Second)
 			}
 		}
