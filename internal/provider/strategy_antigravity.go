@@ -57,12 +57,18 @@ func (s *AntigravityStrategy) OnQuotaHit(state *AuthQuotaState, cooldown *time.D
 		}
 	}
 
-	if cooldown != nil && *cooldown > 0 {
-		state.SetCooldownUntil(now.Add(*cooldown))
-	} else {
-		state.SetCooldownUntil(now.Add(5 * time.Hour))
+	var cooldownUntil time.Time
+	switch {
+	case cooldown != nil && *cooldown > 0:
+		cooldownUntil = now.Add(*cooldown)
+	default:
+		if real := state.GetRealQuota(); real != nil && !real.WindowResetAt.IsZero() && real.WindowResetAt.After(now) {
+			cooldownUntil = real.WindowResetAt
+		} else {
+			cooldownUntil = now.Add(5 * time.Hour)
+		}
 	}
-
+	state.SetCooldownUntil(cooldownUntil)
 	state.TotalTokensUsed.Store(0)
 }
 
@@ -72,7 +78,28 @@ func (s *AntigravityStrategy) RecordUsage(state *AuthQuotaState, tokens int64) {
 	}
 }
 
-func (s *AntigravityStrategy) StartRefresh(ctx context.Context, auth *Auth) <-chan *RealQuotaSnapshot {
+const (
+	pollIntervalNormal     = 2 * time.Minute
+	pollIntervalIncreased  = 30 * time.Second
+	pollIntervalAggressive = 10 * time.Second
+	minFetchInterval       = 3 * time.Second // Prevent API spam
+
+	quotaThresholdLow      = 0.20
+	quotaThresholdCritical = 0.05
+)
+
+func adaptivePollInterval(remainingFraction float64) time.Duration {
+	switch {
+	case remainingFraction <= quotaThresholdCritical:
+		return pollIntervalAggressive
+	case remainingFraction <= quotaThresholdLow:
+		return pollIntervalIncreased
+	default:
+		return pollIntervalNormal
+	}
+}
+
+func (s *AntigravityStrategy) StartRefresh(ctx context.Context, auth *Auth, state *AuthQuotaState) <-chan *RealQuotaSnapshot {
 	ch := make(chan *RealQuotaSnapshot, 1)
 
 	if auth == nil {
@@ -80,36 +107,78 @@ func (s *AntigravityStrategy) StartRefresh(ctx context.Context, auth *Auth) <-ch
 		return ch
 	}
 
+	var triggerCh <-chan struct{}
+	if state != nil {
+		triggerCh = state.GetRefreshTrigger()
+	}
+
 	go func() {
 		defer close(ch)
 
-		jitter := time.Duration(rand.Float64() * float64(30*time.Second))
-		time.Sleep(jitter)
+		// Startup Smear: Random delay 0-2s to prevent thundering herd on restart
+		initialJitter := time.Duration(rand.Float64() * float64(2*time.Second))
+		select {
+		case <-time.After(initialJitter):
+		case <-ctx.Done():
+			return
+		}
 
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
+		currentInterval := pollIntervalNormal
+		lastFetch := time.Time{}
 
-		fetchQuota := func() {
+		fetchQuota := func() *RealQuotaSnapshot {
 			token := extractAccessToken(auth)
 			if token == "" {
-				return
+				return nil
 			}
-			if snapshot := fetchAntigravityQuota(ctx, token); snapshot != nil {
+			snapshot := fetchAntigravityQuota(ctx, token)
+			lastFetch = time.Now()
+			if snapshot != nil {
 				select {
 				case ch <- snapshot:
 				default:
 				}
+				currentInterval = adaptivePollInterval(snapshot.RemainingFraction)
 			}
+			return snapshot
 		}
 
 		fetchQuota()
+
+		timer := time.NewTimer(currentInterval)
+		defer timer.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-triggerCh:
+				elapsed := time.Since(lastFetch)
+				if elapsed < minFetchInterval {
+					// Rate limited: Schedule fetch for when cooldown expires
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					wait := minFetchInterval - elapsed
+					timer.Reset(wait)
+					continue
+				}
+				// Safe to fetch immediately
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				fetchQuota()
+				timer.Reset(currentInterval)
+
+			case <-timer.C:
+				fetchQuota()
+				timer.Reset(currentInterval)
 			}
 		}
 	}()

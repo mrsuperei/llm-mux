@@ -20,7 +20,9 @@ type AuthQuotaState struct {
 	LearnedLimit    atomic.Int64
 	LearnedCooldown atomic.Int64
 
-	RealQuota atomic.Pointer[RealQuotaSnapshot]
+	RealQuota      atomic.Pointer[RealQuotaSnapshot]
+	refreshTrigger chan struct{}
+	triggerOnce    sync.Once
 }
 
 func (s *AuthQuotaState) GetRealQuota() *RealQuotaSnapshot {
@@ -29,6 +31,22 @@ func (s *AuthQuotaState) GetRealQuota() *RealQuotaSnapshot {
 
 func (s *AuthQuotaState) SetRealQuota(snapshot *RealQuotaSnapshot) {
 	s.RealQuota.Store(snapshot)
+}
+
+func (s *AuthQuotaState) TriggerRefresh() {
+	if s.refreshTrigger != nil {
+		select {
+		case s.refreshTrigger <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *AuthQuotaState) GetRefreshTrigger() <-chan struct{} {
+	s.triggerOnce.Do(func() {
+		s.refreshTrigger = make(chan struct{}, 1)
+	})
+	return s.refreshTrigger
 }
 
 // GetCooldownUntil returns the cooldown deadline as time.Time.
@@ -282,20 +300,50 @@ func (m *QuotaManager) filterAvailable(auths []*Auth, model string, now time.Tim
 			continue
 		}
 
-		// Lock-free check of cooldown via atomic
 		state := m.getState(auth.ID)
-		if state != nil && now.Before(state.GetCooldownUntil()) {
-			continue
-		}
 
-		blocked, _, _ := isAuthBlockedForModel(auth, model, now)
-		if blocked {
+		switch m.checkAvailability(state, auth, model, now) {
+		case availabilityBlocked:
 			continue
+		case availabilityAvailable, availabilityUnknown:
+			available = append(available, auth)
 		}
-
-		available = append(available, auth)
 	}
 	return available
+}
+
+type availabilityStatus int
+
+const (
+	availabilityUnknown availabilityStatus = iota
+	availabilityAvailable
+	availabilityBlocked
+)
+
+const realQuotaFreshness = 5 * time.Minute
+
+func (m *QuotaManager) checkAvailability(state *AuthQuotaState, auth *Auth, model string, now time.Time) availabilityStatus {
+	if state != nil {
+		if real := state.GetRealQuota(); real != nil && time.Since(real.FetchedAt) < realQuotaFreshness {
+			if real.RemainingFraction > quotaRecoveredThreshold {
+				return availabilityAvailable
+			}
+			if real.RemainingFraction <= quotaExhaustedThreshold {
+				return availabilityBlocked
+			}
+		}
+
+		if now.Before(state.GetCooldownUntil()) {
+			return availabilityBlocked
+		}
+	}
+
+	blocked, _, _ := isAuthBlockedForModel(auth, model, now)
+	if blocked {
+		return availabilityBlocked
+	}
+
+	return availabilityUnknown
 }
 
 func (m *QuotaManager) buildRetryError(auths []*Auth, now time.Time) error {
@@ -306,6 +354,14 @@ func (m *QuotaManager) buildRetryError(auths []*Auth, now time.Time) error {
 		if state == nil {
 			continue
 		}
+
+		if real := state.GetRealQuota(); real != nil && !real.WindowResetAt.IsZero() && real.WindowResetAt.After(now) {
+			if earliest.IsZero() || real.WindowResetAt.Before(earliest) {
+				earliest = real.WindowResetAt
+			}
+			continue
+		}
+
 		cooldownUntil := state.GetCooldownUntil()
 		if cooldownUntil.After(now) {
 			if earliest.IsZero() || cooldownUntil.Before(earliest) {
@@ -353,6 +409,7 @@ func (m *QuotaManager) RecordQuotaHit(authID, provider, model string, cooldown *
 	state := m.getOrCreateState(authID)
 	strategy := m.getStrategy(provider)
 	strategy.OnQuotaHit(state, cooldown)
+	state.TriggerRefresh()
 }
 
 func (m *QuotaManager) incrementActive(authID string) {
@@ -461,13 +518,48 @@ func (m *QuotaManager) RegisterAuth(ctx context.Context, auth *Auth) {
 	m.refreshCancels[auth.ID] = cancel
 	m.refreshMu.Unlock()
 
-	ch := refresher.StartRefresh(refreshCtx, auth)
+	state := m.getOrCreateState(auth.ID)
+	ch := refresher.StartRefresh(refreshCtx, auth, state)
 	go func() {
 		for snapshot := range ch {
-			state := m.getOrCreateState(auth.ID)
 			state.SetRealQuota(snapshot)
+			m.handleQuotaSnapshotUpdate(state, snapshot)
 		}
 	}()
+}
+
+const (
+	quotaExhaustedThreshold = 0.02
+	quotaRecoveredThreshold = 0.05
+)
+
+func (m *QuotaManager) handleQuotaSnapshotUpdate(state *AuthQuotaState, snapshot *RealQuotaSnapshot) {
+	if state == nil || snapshot == nil {
+		return
+	}
+
+	now := time.Now()
+	currentCooldown := state.GetCooldownUntil()
+	hasCooldown := !currentCooldown.IsZero() && currentCooldown.After(now)
+
+	if snapshot.RemainingFraction <= quotaExhaustedThreshold {
+		if !hasCooldown {
+			var cooldownUntil time.Time
+			if !snapshot.WindowResetAt.IsZero() && snapshot.WindowResetAt.After(now) {
+				cooldownUntil = snapshot.WindowResetAt
+			} else {
+				cooldownUntil = now.Add(5 * time.Hour)
+			}
+			state.SetCooldownUntil(cooldownUntil)
+			state.SetLastExhaustedAt(now)
+		}
+		return
+	}
+
+	if hasCooldown && snapshot.RemainingFraction >= quotaRecoveredThreshold {
+		state.SetCooldownUntil(time.Time{})
+		state.TotalTokensUsed.Store(0)
+	}
 }
 
 func (m *QuotaManager) UnregisterAuth(authID string) {

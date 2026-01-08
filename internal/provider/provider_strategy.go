@@ -25,7 +25,8 @@ type BackgroundRefresher interface {
 	ProviderStrategy
 	// StartRefresh begins background quota polling for this auth.
 	// Returns a channel that receives updated quota snapshots.
-	StartRefresh(ctx context.Context, auth *Auth) <-chan *RealQuotaSnapshot
+	// state provides access to trigger channel for immediate refresh requests.
+	StartRefresh(ctx context.Context, auth *Auth, state *AuthQuotaState) <-chan *RealQuotaSnapshot
 }
 
 // RealQuotaSnapshot holds data from real provider APIs.

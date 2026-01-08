@@ -18,6 +18,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/provider"
+	"github.com/nghyane/llm-mux/internal/runtime/executor"
 	"github.com/nghyane/llm-mux/internal/transport"
 	"github.com/nghyane/llm-mux/internal/usage"
 	"github.com/nghyane/llm-mux/internal/util"
@@ -419,6 +420,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
+
+	go executor.PrewarmAntigravityConnections(ctx)
 
 	s.serverErr = make(chan error, 1)
 	go func() {

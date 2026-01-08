@@ -444,12 +444,16 @@ func (e *AntigravityExecutor) buildCountTokensRequest(ctx context.Context, token
 	ub.WriteString(base)
 	ub.WriteString(antigravityCountTokensPath)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, ub.String(), bytes.NewReader(payload))
+	compressed := executor.CompressRequestBody(payload)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, ub.String(), bytes.NewReader(compressed.Data))
 	if err != nil {
 		return nil, err
 	}
 
 	executor.SetCommonHeaders(httpReq, "application/json")
+	if compressed.IsCompressed {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/json")
 	applyGeminiCLIHeaders(httpReq)
@@ -611,11 +615,15 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *provider.A
 	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
 	payload = applySystemInstructionWithAntigravityIdentity(payload)
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, ub.String(), bytes.NewReader(payload))
+	compressed := executor.CompressRequestBody(payload)
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, ub.String(), bytes.NewReader(compressed.Data))
 	if errReq != nil {
 		return nil, errReq
 	}
 	executor.SetCommonHeaders(httpReq, "application/json")
+	if compressed.IsCompressed {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 	if stream {

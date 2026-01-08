@@ -83,12 +83,17 @@ type HTTPResult struct {
 // but the function still returns (result, nil) so caller can inspect body.
 // Caller MUST check result.Error for non-2xx status codes.
 func (b *BaseExecutor) DoRequest(ctx context.Context, cfg HTTPRequestConfig) (*HTTPResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL, bytes.NewReader(cfg.Body))
+	compressed := CompressRequestBody(cfg.Body)
+
+	httpReq, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL, bytes.NewReader(compressed.Data))
 	if err != nil {
 		return nil, err
 	}
 
 	SetCommonHeaders(httpReq, cfg.ContentType)
+	if compressed.IsCompressed {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 	for k, v := range cfg.Headers {
 		httpReq.Header.Set(k, v)
 	}
