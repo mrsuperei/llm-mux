@@ -4,10 +4,11 @@ package api
 import (
 	"errors"
 	"fmt"
-	"github.com/nghyane/llm-mux/internal/json"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/nghyane/llm-mux/internal/json"
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/access"
@@ -124,6 +125,9 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/gemini/callback", oauthCallbackHandler("gemini")) // alias
 	s.engine.GET("/iflow/callback", oauthCallbackHandler("iflow"))
 	s.engine.GET("/antigravity/callback", oauthCallbackHandler("antigravity"))
+
+	// Serve static files from /web directory for OAuth UI
+	s.engine.Static("/oauth-ui", "./web")
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }

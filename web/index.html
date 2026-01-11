@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM-Mux OAuth Authentication</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔐 OAuth Authentication</h1>
+            <p class="subtitle">Connect your LLM provider accounts</p>
+        </header>
+
+        <div class="api-config">
+            <label for="api-url">API Base URL:</label>
+            <input type="text" id="api-url" value="/v1/management" placeholder="/v1/management">
+        </div>
+
+        <div class="api-config">
+            <label for="management-key">Management Key:</label>
+            <input type="password" id="management-key" placeholder="Enter management key">
+        </div>
+
+        <main>
+            <section class="providers-section">
+                <h2>OAuth Providers</h2>
+                <div class="providers-grid" id="oauth-providers">
+                    <!-- OAuth provider buttons will be inserted here -->
+                </div>
+            </section>
+
+            <section class="providers-section">
+                <h2>Device Flow Providers</h2>
+                <div class="providers-grid" id="device-providers">
+                    <!-- Device flow provider buttons will be inserted here -->
+                </div>
+            </section>
+
+            <section class="active-flow" id="active-flow" style="display: none;">
+                <div class="flow-card">
+                    <div class="flow-header">
+                        <h3 id="flow-provider-name">Connecting...</h3>
+                        <span class="status-badge" id="flow-status">pending</span>
+                    </div>
+                    
+                    <div class="flow-content" id="flow-content">
+                        <!-- Dynamic content based on flow type -->
+                    </div>
+
+                    <div class="flow-actions">
+                        <button class="btn btn-cancel" id="cancel-flow-btn">Cancel</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="status-messages" id="status-messages">
+                <!-- Status messages will appear here -->
+            </section>
+        </main>
+
+        <footer>
+            <p>LLM-Mux Management UI</p>
+        </footer>
+    </div>
+
+    <script src="oauth.js"></script>
+</body>
+</html>

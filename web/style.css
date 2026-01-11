@@ -1,0 +1,618 @@
+/* LLM-Mux OAuth Authentication UI Styles */
+
+/* CSS Variables for theming */
+:root {
+    --primary-color: #6366f1;
+    --primary-hover: #4f46e5;
+    --success-color: #10b981;
+    --error-color: #ef4444;
+    --warning-color: #f59e0b;
+    --info-color: #3b82f6;
+    --bg-color: #0f172a;
+    --card-bg: #1e293b;
+    --card-hover: #334155;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --border-color: #334155;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+}
+
+/* Reset and base styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.6;
+}
+
+/* Container */
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+/* Header */
+header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+header h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+}
+
+/* API Configuration */
+.api-config {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    padding: 1rem;
+    background: var(--card-bg);
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.api-config label {
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.api-config input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 1rem;
+    transition: border-color 0.2s;
+}
+
+.api-config input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+/* Main content */
+main {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+/* Provider sections */
+.providers-section {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.5rem;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow);
+}
+
+.providers-section h2 {
+    font-size: 1.5rem;
+    margin-bottom: 1.5rem;
+    color: var(--text-primary);
+}
+
+/* Provider grid */
+.providers-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+/* Provider card button */
+.provider-card {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem;
+    background: var(--bg-color);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+}
+
+.provider-card:hover {
+    background: var(--card-hover);
+    border-color: var(--primary-color);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.provider-card:active {
+    transform: translateY(0);
+}
+
+.provider-icon {
+    font-size: 2rem;
+    flex-shrink: 0;
+}
+
+.provider-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.provider-name {
+    font-weight: 600;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+}
+
+.provider-desc {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.provider-arrow {
+    color: var(--text-secondary);
+    font-size: 1.25rem;
+    transition: transform 0.2s;
+}
+
+.provider-card:hover .provider-arrow {
+    transform: translateX(4px);
+    color: var(--primary-color);
+}
+
+/* Active flow section */
+.active-flow {
+    animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.flow-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+}
+
+.flow-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
+}
+
+.flow-header h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+}
+
+/* Status badges */
+.status-badge {
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.status-pending {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--warning-color);
+    border: 1px solid var(--warning-color);
+}
+
+.status-completed {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--success-color);
+    border: 1px solid var(--success-color);
+}
+
+.status-failed {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--error-color);
+    border: 1px solid var(--error-color);
+}
+
+.status-cancelled {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-secondary);
+    border: 1px solid var(--text-secondary);
+}
+
+/* Flow content */
+.flow-content {
+    padding: 2rem;
+}
+
+/* OAuth instructions */
+.oauth-instructions,
+.device-flow-instructions {
+    text-align: center;
+}
+
+.oauth-instructions p,
+.device-flow-instructions p {
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.device-flow-instructions h4 {
+    color: var(--text-primary);
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1rem;
+}
+
+.device-flow-instructions h4:first-child {
+    margin-top: 0;
+}
+
+/* Verification link */
+.verification-link {
+    display: inline-block;
+    color: var(--primary-color);
+    text-decoration: none;
+    word-break: break-all;
+    padding: 0.5rem 1rem;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.verification-link:hover {
+    background: rgba(99, 102, 241, 0.2);
+    text-decoration: underline;
+}
+
+/* User code display */
+.user-code {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+.user-code code {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: 0.25rem;
+    color: var(--primary-color);
+    background: var(--bg-color);
+    padding: 1rem 2rem;
+    border-radius: 8px;
+    border: 2px solid var(--primary-color);
+    font-family: 'Courier New', monospace;
+}
+
+/* Buttons */
+.btn {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.btn-cancel {
+    background: var(--error-color);
+    color: white;
+}
+
+.btn-cancel:hover {
+    background: #dc2626;
+}
+
+.btn-copy {
+    background: var(--primary-color);
+    color: white;
+    font-size: 0.875rem;
+    padding: 0.5rem 1rem;
+}
+
+.btn-copy:hover {
+    background: var(--primary-hover);
+}
+
+/* Flow actions */
+.flow-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--border-color);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/* Loading spinner */
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    margin: 1.5rem auto;
+    border: 4px solid var(--border-color);
+    border-top-color: var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.polling-info {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-style: italic;
+}
+
+/* Flow complete/error/cancelled states */
+.flow-complete,
+.flow-error,
+.flow-cancelled {
+    text-align: center;
+    padding: 2rem;
+}
+
+.flow-complete .success-icon,
+.flow-error .error-icon,
+.flow-cancelled .cancelled-icon {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 1.5rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 3rem;
+}
+
+.flow-complete .success-icon {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--success-color);
+}
+
+.flow-error .error-icon {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--error-color);
+}
+
+.flow-cancelled .cancelled-icon {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-secondary);
+}
+
+.flow-complete h4,
+.flow-error h4,
+.flow-cancelled h4 {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.flow-complete h4 {
+    color: var(--success-color);
+}
+
+.flow-error h4 {
+    color: var(--error-color);
+}
+
+.flow-cancelled h4 {
+    color: var(--text-secondary);
+}
+
+/* Status messages */
+.status-messages {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 400px;
+}
+
+.message {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    animation: slideInRight 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(100px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.message-icon {
+    flex-shrink: 0;
+    font-weight: bold;
+    font-size: 1.25rem;
+}
+
+.message-text {
+    flex: 1;
+    font-size: 0.9375rem;
+    line-height: 1.4;
+}
+
+.message-close {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+    padding: 0;
+    margin-left: 0.5rem;
+}
+
+.message-close:hover {
+    opacity: 1;
+}
+
+.message-success {
+    background: rgba(16, 185, 129, 0.9);
+    color: white;
+}
+
+.message-error {
+    background: rgba(239, 68, 68, 0.9);
+    color: white;
+}
+
+.message-info {
+    background: rgba(59, 130, 246, 0.9);
+    color: white;
+}
+
+/* Footer */
+footer {
+    text-align: center;
+    margin-top: 3rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    .container {
+        padding: 1rem;
+    }
+
+    header h1 {
+        font-size: 2rem;
+    }
+
+    .subtitle {
+        font-size: 1rem;
+    }
+
+    .api-config {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .providers-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .status-messages {
+        left: 1rem;
+        right: 1rem;
+        max-width: none;
+    }
+
+    .user-code code {
+        font-size: 1.5rem;
+        padding: 0.75rem 1rem;
+        letter-spacing: 0.125rem;
+    }
+}
+
+@media (max-width: 480px) {
+    header h1 {
+        font-size: 1.5rem;
+    }
+
+    .providers-section {
+        padding: 1rem;
+    }
+
+    .provider-card {
+        padding: 1rem;
+    }
+
+    .provider-icon {
+        font-size: 1.5rem;
+    }
+
+    .flow-header {
+        padding: 1rem;
+    }
+
+    .flow-content {
+        padding: 1rem;
+    }
+}
+
+/* Accessibility */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* Focus styles for accessibility */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    :root {
+        --border-color: #64748b;
+    }
+}
